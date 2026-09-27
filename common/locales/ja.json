@@ -210,7 +210,19 @@
         "downloadMinedSubsAsSrt": "マイニングした字幕を SRT 形式でダウンロードする",
         "exportToAnki": "Anki にエクスポートする",
         "miningHistoryEmpty": "マイニング履歴はありません",
-        "deleteAll": "全てを削除"
+        "deleteAll": "全てを削除",
+        "miningExport": "Export history",
+        "miningExportFormat": "File type",
+        "miningExportScope": "What to export",
+        "miningExportScopeAll": "Everything (one file)",
+        "miningExportScopePerFile": "One file per video",
+        "miningExportRange": "Which items",
+        "miningExportRangeAll": "Everything",
+        "miningExportRangeToday": "Today",
+        "miningExportRangeLast7Days": "Last 7 days",
+        "miningExportRangeUnexported": "Only new items",
+        "miningExportAction": "Download {{count}} items",
+        "miningExportEmpty": "No items match"
     },
     "error": {
         "bothAudioAndVideNotAllowed": "音声と動画ファイルを同時にロードできません",

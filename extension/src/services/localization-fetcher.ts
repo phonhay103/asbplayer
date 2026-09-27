@@ -19,11 +19,16 @@ export const fetchLocalization = async (lang: string): Promise<Localization> => 
         return (await bundledStringsForLang(lang)) ?? (await bundledStringsForLang('en'))!;
     }
 
-    return (
-        (await cachedStringsForLang(lang)) ??
-        (await bundledStringsForLang(lang)) ??
-        (await bundledStringsForLang('en'))!
-    );
+    const bundled = (await bundledStringsForLang(lang)) ?? (await bundledStringsForLang('en'))!;
+    const cached = await cachedStringsForLang(lang);
+
+    if (cached === undefined) {
+        return bundled;
+    }
+
+    // Merge cached strings over bundled ones so newly added keys always resolve,
+    // even when the cached copy predates them.
+    return { lang: bundled.lang, strings: mergeStrings(bundled.strings, cached.strings) };
 };
 
 export const fetchSupportedLanguages = async (): Promise<string[]> => {
@@ -105,4 +110,21 @@ const cachedStringsForLang = async (lang: string): Promise<Localization | undefi
     }
 
     return { lang, strings };
+};
+
+const isPlainObject = (value: unknown): value is { [key: string]: unknown } =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const mergeStrings = (base: unknown, override: unknown): unknown => {
+    if (!isPlainObject(base) || !isPlainObject(override)) {
+        return override === undefined ? base : override;
+    }
+
+    const merged: { [key: string]: unknown } = { ...base };
+
+    for (const key of Object.keys(override)) {
+        merged[key] = key in merged ? mergeStrings(merged[key], override[key]) : override[key];
+    }
+
+    return merged;
 };

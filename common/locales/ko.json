@@ -210,7 +210,19 @@
         "downloadMinedSubsAsSrt": "추출한 자막을 SRT 파일로 다운로드",
         "exportToAnki": "Anki로 내보내기",
         "miningHistoryEmpty": "자막 추출 이력 없음",
-        "deleteAll": "초기화"
+        "deleteAll": "초기화",
+        "miningExport": "Export history",
+        "miningExportFormat": "File type",
+        "miningExportScope": "What to export",
+        "miningExportScopeAll": "Everything (one file)",
+        "miningExportScopePerFile": "One file per video",
+        "miningExportRange": "Which items",
+        "miningExportRangeAll": "Everything",
+        "miningExportRangeToday": "Today",
+        "miningExportRangeLast7Days": "Last 7 days",
+        "miningExportRangeUnexported": "Only new items",
+        "miningExportAction": "Download {{count}} items",
+        "miningExportEmpty": "No items match"
     },
     "error": {
         "bothAudioAndVideNotAllowed": "오디오 파일과 비디오 파일을 동시에 불러올 수 없습니다.",

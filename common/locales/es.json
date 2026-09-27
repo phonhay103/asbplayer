@@ -210,7 +210,19 @@
         "downloadMinedSubsAsSrt": "Descargar Subtítulos minados como SRT",
         "exportToAnki": "Exportar a Anki",
         "miningHistoryEmpty": "El historial de minado está vacío.",
-        "deleteAll": "Limpiar historial"
+        "deleteAll": "Limpiar historial",
+        "miningExport": "Export history",
+        "miningExportFormat": "File type",
+        "miningExportScope": "What to export",
+        "miningExportScopeAll": "Everything (one file)",
+        "miningExportScopePerFile": "One file per video",
+        "miningExportRange": "Which items",
+        "miningExportRangeAll": "Everything",
+        "miningExportRangeToday": "Today",
+        "miningExportRangeLast7Days": "Last 7 days",
+        "miningExportRangeUnexported": "Only new items",
+        "miningExportAction": "Download {{count}} items",
+        "miningExportEmpty": "No items match"
     },
     "error": {
         "bothAudioAndVideNotAllowed": "No pueden cargarse archivos de audio y video simultáneamente",

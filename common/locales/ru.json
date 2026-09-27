@@ -210,7 +210,19 @@
         "downloadMinedSubsAsSrt": "Скачать смайненные субтитры в формате SRT",
         "exportToAnki": "Экспортировать в Anki",
         "miningHistoryEmpty": "История майнинга пуста.",
-        "deleteAll": "Очистить"
+        "deleteAll": "Очистить",
+        "miningExport": "Export history",
+        "miningExportFormat": "File type",
+        "miningExportScope": "What to export",
+        "miningExportScopeAll": "Everything (one file)",
+        "miningExportScopePerFile": "One file per video",
+        "miningExportRange": "Which items",
+        "miningExportRangeAll": "Everything",
+        "miningExportRangeToday": "Today",
+        "miningExportRangeLast7Days": "Last 7 days",
+        "miningExportRangeUnexported": "Only new items",
+        "miningExportAction": "Download {{count}} items",
+        "miningExportEmpty": "No items match"
     },
     "error": {
         "bothAudioAndVideNotAllowed": "Невозможно одновременно загрузить аудиофайл и видеофайл",

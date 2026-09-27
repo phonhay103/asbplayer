@@ -42,6 +42,26 @@ it('attempts to update existing record same ID', async () => {
     expect(records[0]).toMatchObject({ ...item, subtitle: { ...item.subtitle, text: 'text2' } });
 });
 
+it('persists word, definition, text and custom fields', async () => {
+    const repository = new IndexedDBCopyHistoryRepository(10);
+    const item = {
+        subtitle: { text: 'text', start: 0, end: 1, originalStart: 0, originalEnd: 1, track: 0 },
+        id: 'id',
+        timestamp: 1234,
+        surroundingSubtitles: [],
+        subtitleFileName: 'subtitle-file',
+        mediaTimestamp: 5678,
+        word: 'word',
+        definition: 'definition',
+        text: 'overridden text',
+        customFieldValues: { custom1: 'value1' },
+    };
+    await repository.save(item);
+    const records = await repository.fetch(1);
+    expect(records.length).toEqual(1);
+    expect(records[0]).toMatchObject(item);
+});
+
 it('respects table size limit', async () => {
     const repository = new IndexedDBCopyHistoryRepository(1);
     const item = {

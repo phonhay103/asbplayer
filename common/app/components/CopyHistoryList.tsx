@@ -23,6 +23,7 @@ import type { Theme } from '@mui/material';
 import type { CopyHistoryItem } from '@project/common';
 import { AudioClip } from '@project/common/audio-clip';
 import { MediaFragment } from '@project/common';
+import MiningExportMenu from '@project/common/app/components/MiningExportMenu';
 
 interface CopyHistoryListProps {
     open: boolean;
@@ -386,6 +387,7 @@ export default function CopyHistoryList({
 
         content = (
             <Paper square className={classes.listContainer} ref={listContainerRef}>
+                <MiningExportMenu items={items} />
                 <List className={classes.list}>{elements}</List>
                 <Button
                     variant="contained"

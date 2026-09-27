@@ -210,7 +210,19 @@
         "downloadMinedSubsAsSrt": "Lataa (SRT)",
         "exportToAnki": "Vie Ankiin",
         "miningHistoryEmpty": "Louhintahistoria on tyhjä.",
-        "deleteAll": "Tyhjennä"
+        "deleteAll": "Tyhjennä",
+        "miningExport": "Export history",
+        "miningExportFormat": "File type",
+        "miningExportScope": "What to export",
+        "miningExportScopeAll": "Everything (one file)",
+        "miningExportScopePerFile": "One file per video",
+        "miningExportRange": "Which items",
+        "miningExportRangeAll": "Everything",
+        "miningExportRangeToday": "Today",
+        "miningExportRangeLast7Days": "Last 7 days",
+        "miningExportRangeUnexported": "Only new items",
+        "miningExportAction": "Download {{count}} items",
+        "miningExportEmpty": "No items match"
     },
     "error": {
         "bothAudioAndVideNotAllowed": "Ääni- ja videotiedostoa ei voi ladata samanaikaisesti",

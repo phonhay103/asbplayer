@@ -118,6 +118,10 @@ export class IndexedDBCopyHistoryRepository implements CopyHistoryRepository {
             audio: item.audio,
             file: item.file,
             mediaTimestamp: item.mediaTimestamp,
+            word: item.word,
+            definition: item.definition,
+            text: item.text,
+            customFieldValues: item.customFieldValues,
         };
         const existingPrimaryKeys = await this._db.copyHistoryItems.where('id').equals(item.id).primaryKeys();
 
