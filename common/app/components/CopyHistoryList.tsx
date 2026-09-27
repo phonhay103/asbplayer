@@ -327,8 +327,14 @@ export default function CopyHistoryList({
                 elements.push(
                     <ListItem key={key}>
                         <Typography color="textSecondary">{item.subtitleFileName}</Typography>
-                        {onDownloadSectionAsSrt && (
-                            <ListItemSecondaryAction>
+                        <ListItemSecondaryAction>
+                            <MiningExportMenu
+                                items={itemsBySection[key]}
+                                scopeLock="section"
+                                trigger="icon"
+                                sectionName={item.subtitleFileName}
+                            />
+                            {onDownloadSectionAsSrt && (
                                 <Tooltip title={t('copyHistory.downloadMinedSubsAsSrt')}>
                                     <IconButton
                                         onClick={() =>
@@ -339,8 +345,8 @@ export default function CopyHistoryList({
                                         <SaveAltIcon />
                                     </IconButton>
                                 </Tooltip>
-                            </ListItemSecondaryAction>
-                        )}
+                            )}
+                        </ListItemSecondaryAction>
                     </ListItem>
                 );
             }

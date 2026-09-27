@@ -2,9 +2,12 @@ import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Button from '@mui/material/Button';
 import Divider from '@mui/material/Divider';
+import IconButton from '@mui/material/IconButton';
 import Popover from '@mui/material/Popover';
 import Typography from '@mui/material/Typography';
 import SaveAltIcon from '@mui/icons-material/SaveAlt';
+import DownloadIcon from '@mui/icons-material/Download';
+import Tooltip from '@project/common/components/Tooltip';
 import { makeStyles } from '@mui/styles';
 import type { Theme } from '@mui/material';
 import type { CopyHistoryItem } from '@project/common';
@@ -47,6 +50,12 @@ type Scope = 'all' | 'section';
 
 interface MiningExportMenuProps {
     items: CopyHistoryItem[];
+    // When set, the scope selector is hidden and export is limited to this scope.
+    scopeLock?: Scope;
+    // Compact icon trigger for section headers instead of the full-width button.
+    trigger?: 'button' | 'icon';
+    // File name used for single-section export. Defaults to the section's subtitle file name.
+    sectionName?: string;
 }
 
 const sanitizeFileNamePart = (name: string): string => name.replace(/[\\/:*?"<>|#%&{}$!'@+=`]/g, '_').slice(0, 80);
@@ -64,12 +73,12 @@ const computeRangedItems = (items: CopyHistoryItem[], range: MiningExportRange):
     return items;
 };
 
-export default function MiningExportMenu({ items }: MiningExportMenuProps) {
+export default function MiningExportMenu({ items, scopeLock, trigger = 'button', sectionName }: MiningExportMenuProps) {
     const classes = useStyles();
     const { t } = useTranslation();
     const [anchorEl, setAnchorEl] = useState<Element>();
     const [format, setFormat] = useState<MiningExportFormat>('csv');
-    const [scope, setScope] = useState<Scope>('all');
+    const [scope, setScope] = useState<Scope>(scopeLock ?? 'all');
     const [range, setRange] = useState<MiningExportRange>('all');
 
     const open = anchorEl !== undefined;
@@ -82,15 +91,19 @@ export default function MiningExportMenu({ items }: MiningExportMenuProps) {
     const rangedItems = computeRangedItems(items, range);
 
     const handleExport = useCallback(() => {
+        const singleSectionName =
+            sectionName ?? (scopeLock === 'section' ? rangedItems[0]?.subtitleFileName : undefined) ?? 'unknown';
         const groups: { name: string; items: CopyHistoryItem[] }[] =
             scope === 'section'
-                ? Object.entries(
-                      rangedItems.reduce<{ [key: string]: CopyHistoryItem[] }>((acc, item) => {
-                          const key = item.subtitleFileName || 'unknown';
-                          (acc[key] = acc[key] ?? []).push(item);
-                          return acc;
-                      }, {})
-                  ).map(([name, groupItems]) => ({ name, items: groupItems }))
+                ? scopeLock === 'section'
+                    ? [{ name: singleSectionName, items: rangedItems }]
+                    : Object.entries(
+                          rangedItems.reduce<{ [key: string]: CopyHistoryItem[] }>((acc, item) => {
+                              const key = item.subtitleFileName || 'unknown';
+                              (acc[key] = acc[key] ?? []).push(item);
+                              return acc;
+                          }, {})
+                      ).map(([name, groupItems]) => ({ name, items: groupItems }))
                 : [{ name: '', items: rangedItems }];
 
         let newestTimestamp: number | undefined;
@@ -121,7 +134,7 @@ export default function MiningExportMenu({ items }: MiningExportMenuProps) {
             setLastExportedAt(newestTimestamp);
         }
         handleClose();
-    }, [rangedItems, scope, format, range, handleClose]);
+    }, [rangedItems, scope, scopeLock, sectionName, format, range, handleClose]);
 
     const renderOptions = <T extends string>(
         options: { value: T; label: string }[],
@@ -145,15 +158,23 @@ export default function MiningExportMenu({ items }: MiningExportMenuProps) {
 
     return (
         <>
-            <Button
-                variant="outlined"
-                color="primary"
-                className={classes.exportButton}
-                startIcon={<SaveAltIcon />}
-                onClick={handleOpen}
-            >
-                {t('copyHistory.miningExport')}
-            </Button>
+            {trigger === 'icon' ? (
+                <Tooltip title={t('copyHistory.miningExportSection')}>
+                    <IconButton onClick={handleOpen} edge="end">
+                        <DownloadIcon fontSize="small" />
+                    </IconButton>
+                </Tooltip>
+            ) : (
+                <Button
+                    variant="outlined"
+                    color="primary"
+                    className={classes.exportButton}
+                    startIcon={<SaveAltIcon />}
+                    onClick={handleOpen}
+                >
+                    {t('copyHistory.miningExport')}
+                </Button>
+            )}
             <Popover
                 disableEnforceFocus={true}
                 open={open}
@@ -173,17 +194,24 @@ export default function MiningExportMenu({ items }: MiningExportMenuProps) {
                         format,
                         setFormat
                     )}
-                    <Divider />
-                    <Typography variant="caption" color="textSecondary" className={classes.sectionLabel}>
-                        {t('copyHistory.miningExportScope')}
-                    </Typography>
-                    {renderOptions(
-                        [
-                            { value: 'all' as const, label: t('copyHistory.miningExportScopeAll') },
-                            { value: 'section' as const, label: t('copyHistory.miningExportScopePerFile') },
-                        ],
-                        scope,
-                        setScope
+                    {scopeLock === undefined && (
+                        <>
+                            <Divider />
+                            <Typography variant="caption" color="textSecondary" className={classes.sectionLabel}>
+                                {t('copyHistory.miningExportScope')}
+                            </Typography>
+                            {renderOptions(
+                                [
+                                    { value: 'all' as const, label: t('copyHistory.miningExportScopeAll') },
+                                    {
+                                        value: 'section' as const,
+                                        label: t('copyHistory.miningExportScopePerFile'),
+                                    },
+                                ],
+                                scope,
+                                setScope
+                            )}
+                        </>
                     )}
                     <Divider />
                     <Typography variant="caption" color="textSecondary" className={classes.sectionLabel}>

@@ -222,7 +222,8 @@
         "miningExportRangeLast7Days": "Last 7 days",
         "miningExportRangeUnexported": "Only new items",
         "miningExportAction": "Download {{count}} items",
-        "miningExportEmpty": "No items match"
+        "miningExportEmpty": "No items match",
+        "miningExportSection": "Export this video"
     },
     "error": {
         "bothAudioAndVideNotAllowed": "Nie można załadować plików audio i wideo naraz",
