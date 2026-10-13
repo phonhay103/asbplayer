@@ -1,4 +1,7 @@
-minimumReleaseAge: 720
+# Supply-chain lag: only install versions published more than 7 days ago
+# (pnpm counts minutes), so a malicious or broken publish is yanked before
+# we can pick it up.
+minimumReleaseAge: 10080
 
 packages:
     - 'client'

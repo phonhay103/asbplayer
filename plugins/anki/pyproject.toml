@@ -14,6 +14,8 @@ dependencies = []
 dev = ["aqt[qt]==26.8.1"]
 
 [tool.uv]
+# Supply-chain lag: a release must be 7 days old before the resolver may pick it.
+exclude-newer = "7 days"
 package = false
 
 [tool.basedpyright]
