@@ -1,9 +1,29 @@
-# Secret scanning on every commit (https://github.com/gitleaks/gitleaks).
+# A pnpm monorepo (common / client / extension). It already has eslint and
+# prettier configured and both pass on the tree, so the hooks reuse the repo's
+# own commands instead of pinning a second copy of either tool. `pnpm verify`
+# also runs the three test suites — too slow for every commit, so it stays the
+# pre-push/human step.
 # One-time setup per clone:  pre-commit install
-# The hook builds gitleaks with the Go toolchain on first run, so Go must be
-# on PATH; the built binary is cached afterwards.
-# Only staged changes are scanned, and matches are redacted in the output.
 repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint (common, extension/src, client/src)
+        entry: pnpm eslint common extension/src client/src
+        language: system
+        files: \.(js|ts|tsx)$
+        pass_filenames: false
+
+      - id: prettier
+        name: prettier --check
+        entry: pnpm prettier --check ./(client|common|extension)/**/*.(js|ts|tsx|css) ./scripts/*.ts
+        language: system
+        files: \.(js|ts|tsx|css)$
+        pass_filenames: false
+
+  # The hook builds gitleaks with the Go toolchain on first run, so Go must be
+  # on PATH; the built binary is cached afterwards. Only the staged diff is
+  # scanned, and matches are redacted in the output.
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:
