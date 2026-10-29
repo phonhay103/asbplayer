@@ -5,7 +5,9 @@ import {
     ASB_TOKEN_SELECTED_CLASS,
     ASB_TOKEN_START_ATTRIBUTE,
     clearTokenSelectionInRoot,
+    clearAutoPauseTokenSelectionInRoot,
     currentTokenSelectionLocation,
+    restorableTokenSelectionInRoot,
     selectTokenInRoot,
 } from '@project/common/annotations';
 import { findAdjacentTokenJumpMatch } from '@project/common/annotations/token-navigation';
@@ -13,6 +15,7 @@ import type { TokenJumpMatch, TokenSelectionLocation } from '@project/common/ann
 import type { SelectTokenInRootOptions } from '@project/common/annotations/dom-annotations';
 import type { SeekableTracks, TokenJumpTarget } from '@project/common/settings';
 import { retryWithAnimationFrame } from '@project/common/util';
+import { asbTrace } from '@project/common/util/log';
 
 let lastTokenSelectionOwner: HTMLElement | null = null; // Necessary so VideoPlayer and SubtitlePlayer can coordinate token selection focus (especially after yomitan popup)
 
@@ -102,6 +105,30 @@ export const useTokenSelection = ({
         if (root) clearTokenSelectionInRoot(root);
     }, [clearPendingTokenSelection, rootRef]);
 
+    const selectToken = useCallback(
+        (target: TokenSelectionLocation, options?: SelectTokenInRootOptions) => {
+            const root = rootRef.current;
+            if (root && options?.onlyIfUnselected && restorableTokenSelectionInRoot(root)) return true;
+            if (!root || !selectTokenInRoot(root, target, options)) return false;
+            clearPendingTokenSelection();
+            lastTokenSelectionOwner = playerContainerFor(root);
+            onTokenSelectionClaimed?.();
+            activeTokenSelectionRef.current = target;
+            activeTokenSelectionOptionsRef.current = options;
+            return true;
+        },
+        [clearPendingTokenSelection, onTokenSelectionClaimed, rootRef]
+    );
+
+    const clearPauseTokenSelection = useCallback(() => {
+        if (activeTokenSelectionOptionsRef.current?.autoPause) {
+            clearPendingTokenSelection();
+            activeTokenSelectionRef.current = undefined;
+            activeTokenSelectionOptionsRef.current = undefined;
+        }
+        if (rootRef.current) clearAutoPauseTokenSelectionInRoot(rootRef.current);
+    }, [clearPendingTokenSelection, rootRef]);
+
     const selectPendingToken = useCallback(() => {
         const target = pendingTokenSelectionRef.current;
         const options = pendingTokenSelectionOptionsRef.current;
@@ -109,10 +136,20 @@ export const useTokenSelection = ({
         if (!target || !root) return false;
         const rootContainer = playerContainerFor(root);
         if (lastTokenSelectionOwner && lastTokenSelectionOwner !== rootContainer) {
+            asbTrace('annotations/selection', 'Cancelled token selection because another container owns focus', {
+                subtitleIndex: target.subtitleIndex,
+                tokenStart: target.tokenStart,
+            });
             clearPendingTokenSelection();
             return true;
         }
         if (!selectTokenInRoot(root, target, options)) return false;
+        asbTrace('annotations/selection', 'Selected token', {
+            subtitleIndex: target.subtitleIndex,
+            tokenStart: target.tokenStart,
+            focusContainer: options?.focusContainer ?? true,
+            selectText: options?.selectText ?? true,
+        });
         activeTokenSelectionRef.current = target;
         activeTokenSelectionOptionsRef.current = options;
         clearPendingTokenSelection();
@@ -130,7 +167,26 @@ export const useTokenSelection = ({
             activeTokenSelectionOptionsRef.current = options;
             pendingTokenSelectionRef.current = target;
             pendingTokenSelectionOptionsRef.current = options;
-            tokenSelectionRetryRef.current = retryWithAnimationFrame(selectPendingToken, maxAttempts);
+            asbTrace('annotations/selection', 'Requested token selection', {
+                subtitleIndex: target.subtitleIndex,
+                tokenStart: target.tokenStart,
+                claimOwner,
+                maxAttempts,
+            });
+            let attempts = 0;
+            tokenSelectionRetryRef.current = retryWithAnimationFrame(() => {
+                attempts++;
+                if (selectPendingToken()) return true;
+                if (attempts >= maxAttempts) {
+                    asbTrace('annotations/selection', 'Token selection retry limit reached', {
+                        subtitleIndex: target.subtitleIndex,
+                        tokenStart: target.tokenStart,
+                        attempts,
+                        hasRoot: rootRef.current !== null,
+                    });
+                }
+                return false;
+            }, maxAttempts);
         },
         [cancelTokenSelectionRetry, maxAttempts, onTokenSelectionClaimed, rootRef, selectPendingToken]
     );
@@ -182,17 +238,34 @@ export const useTokenSelection = ({
             const eventContainer = playerContainerFor(eventElement);
             const ownerContainer =
                 eventElement === document.body && lastTokenSelectionOwner ? lastTokenSelectionOwner : eventContainer;
-            if (ownerContainer && ownerContainer !== rootContainer) return false;
+            if (ownerContainer && ownerContainer !== rootContainer) {
+                asbTrace('annotations/navigation', 'Ignored token jump because another container owns focus', {
+                    target,
+                    forward,
+                });
+                return false;
+            }
             if (event.defaultPrevented) return false;
 
+            const timestampMs = getCurrentTime();
+            const seekableTracks = getSeekableTracks();
+            const currentSelection = currentTokenSelectionLocation(subtitles, root);
             const match = findAdjacentTokenJumpMatch(
                 subtitles,
                 target,
                 forward,
-                getCurrentTime(),
-                getSeekableTracks(),
-                currentTokenSelectionLocation(subtitles, root)
+                timestampMs,
+                seekableTracks,
+                currentSelection
             );
+            asbTrace('annotations/navigation', 'Resolved token jump', {
+                target,
+                forward,
+                timestampMs,
+                seekableTracks,
+                currentSelection,
+                match: match ? { subtitleIndex: match.subtitleIndex, tokenStart: match.tokenStart } : null,
+            });
             if (!match) return false;
 
             lastTokenSelectionOwner = rootContainer;
@@ -216,5 +289,5 @@ export const useTokenSelection = ({
         rootRef,
     ]);
 
-    return { selectPendingToken, requestTokenSelection, clearTokenSelection };
+    return { selectToken, selectPendingToken, requestTokenSelection, clearTokenSelection, clearPauseTokenSelection };
 };

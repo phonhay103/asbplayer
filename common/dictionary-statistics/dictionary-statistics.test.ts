@@ -531,12 +531,11 @@ describe('DictionaryStatistics', () => {
 
         await statistics.refreshDictionaryTokens('profile');
 
-        expect((storage.getAllTokens.mock.calls as any[][]).map((call) => call[1])).toEqual([0, 2]);
-
         const snapshot = lastPublishedSnapshot(storage)!;
         expect(snapshot.settings).toEqual({
             dictionaryTracks: await settingsProvider.getSingle('dictionaryTracks'),
         });
+        expect(snapshot.snapshots.map((trackSnapshot) => trackSnapshot.track)).toEqual([0, 2]);
         expect(snapshot.snapshots[0].stats.dictionary.tokens).toEqual({
             alpha: { source: DictionaryTokenSource.LOCAL, statuses: [], states: [] },
         });
@@ -924,7 +923,7 @@ describe('dictionary-statistics view helpers', () => {
         expect(fullTrackSnapshot.numDictionaryKnownTokens).toBe(1);
         expect(fullTrackSnapshot.numDictionaryIgnoredTokens).toBe(1);
         expect(fullTrackSnapshot.numUniqueTokens).toBe(4);
-        expect(fullTrackSnapshot.consideredTokens).toBe(3);
+        expect(fullTrackSnapshot.numConsideredTokens).toBe(3);
         expect(fullTrackSnapshot.numIgnoredTokens).toBe(1);
         expect(fullTrackSnapshot.numIgnoredOccurrences).toBe(1);
         expect(fullTrackSnapshot.numKnownTokens).toBe(1);
@@ -957,6 +956,7 @@ describe('dictionary-statistics view helpers', () => {
         const simplifiedTrackSnapshot = processSimplifiedDictionaryStatistics(snapshot)[0];
         expect(processSimplifiedDictionaryStatistics(undefined)).toEqual([]);
         expect(simplifiedTrackSnapshot.progress).toEqual(snapshot.snapshots[0].progress);
+        expect(simplifiedTrackSnapshot.numConsideredTokens).toBe(3);
         expect(simplifiedTrackSnapshot.comprehensionPercent).toBeCloseTo(10, 6);
         expect(simplifiedTrackSnapshot.sentenceBuckets.uncollected[0].count).toBe(1);
         expect(simplifiedTrackSnapshot.sentenceBuckets.uncollected[1].count).toBe(1);

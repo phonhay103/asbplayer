@@ -13,7 +13,7 @@ import { extractText, sourceString } from '@project/common/util';
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 
 const testAnkiSettings: AnkiSettings = {
-    ankiConnectUrl: 'http://127.0.0.1:8765',
+    ankiConnectUrl: 'http://anki.example.com:1234',
     ankiConnectApiKey: '',
     deck: 'Sentences',
     noteType: 'Sentence',
@@ -31,6 +31,8 @@ const testAnkiSettings: AnkiSettings = {
     tags: [],
     recordWithAudioPlayback: false,
     preferMp3: false,
+    alwaysUseSubtitleForSentence: false,
+    updateLastCardForSameSubtitle: false,
     audioPaddingStart: 0,
     audioPaddingEnd: 0,
     maxImageWidth: 0,
@@ -39,6 +41,7 @@ const testAnkiSettings: AnkiSettings = {
     mediaFragmentTrimStart: 200,
     mediaFragmentTrimEnd: 200,
     mediaFragmentMaxClipLength: 10000,
+    trimBlackBars: false,
     surroundingSubtitlesCountRadius: 0,
     surroundingSubtitlesTimeRadius: 0,
     ankiFieldSettings: {
@@ -382,11 +385,11 @@ describe('Anki', () => {
     it.each([
         {
             name: 'deckNames',
-            invoke: (anki: Anki) => anki.deckNames('http://override:8765'),
+            invoke: (anki: Anki) => anki.deckNames('http://override.example.com:5678'),
             action: 'deckNames',
             params: undefined,
             result: ['Default', 'Mining'],
-            url: 'http://override:8765',
+            url: 'http://override.example.com:5678',
         },
         {
             name: 'modelNames',
@@ -476,11 +479,11 @@ describe('Anki', () => {
 
         const anki = new Anki(testAnkiSettings, fetcher);
 
-        await expect(anki.findCards('is:new', 'http://override:8765')).resolves.toEqual([1, 2]);
+        await expect(anki.findCards('is:new', 'http://override.example.com:5678')).resolves.toEqual([1, 2]);
         await expect(anki.findNotes('deck:Mining')).resolves.toEqual([11, 12]);
         expect(fetcher.fetch.mock.calls).toEqual([
             [
-                'http://override:8765',
+                'http://override.example.com:5678',
                 {
                     action: 'findCards',
                     version: 6,
@@ -1034,15 +1037,61 @@ describe('Anki', () => {
         ]);
     });
 
+    it('exports a default note with an animated webp media fragment as a regular picture', async () => {
+        const fetcher = new MockFetcher();
+        fetcher.fetch.mockResolvedValue(ankiConnectResponse(323));
+        const image = makeImage({ name: 'clip:name?.webp', extension: 'webp' });
+        const anki = new Anki(testAnkiSettings, fetcher);
+
+        const result = await anki.export(makeExportArguments({ audioClip: undefined, image }));
+
+        expect(result).toEqual(323);
+        expect(image.base64Reads).toBe(1);
+        expect(fetcher.fetch).toHaveBeenCalledTimes(1);
+        expect(fetcher.fetch.mock.calls[0][1]).toMatchObject({
+            action: 'addNote',
+            params: {
+                note: {
+                    picture: { filename: 'asbp_clip_name_.webp', data: 'image-base64', fields: ['Image'] },
+                },
+            },
+        });
+    });
+
+    it('exports GUI notes with animated webp media fragments using image html', async () => {
+        const fetcher = new MockFetcher();
+        fetcher.fetch.mockResolvedValueOnce(ankiConnectResponse('stored-clip.webp'));
+        fetcher.fetch.mockResolvedValueOnce(ankiConnectResponse(656));
+        const anki = new Anki(testAnkiSettings, fetcher);
+
+        const result = await anki.export(
+            makeExportArguments({
+                audioClip: undefined,
+                image: makeImage({ name: 'clip:name?.webp', extension: 'webp' }),
+                mode: 'gui',
+            })
+        );
+
+        expect(result).toEqual(656);
+        expect(fetcher.fetch.mock.calls[0][1]).toMatchObject({
+            action: 'storeMediaFile',
+            params: { filename: expect.stringMatching(/^asbp_clip_name__[A-Za-z0-9]{8}\.webp$/) },
+        });
+        expect(fetcher.fetch.mock.calls[1][1]).toMatchObject({
+            action: 'guiAddCards',
+            params: { note: { fields: { Image: '<img src="stored-clip.webp">' } } },
+        });
+    });
+
     it('uses the per-export AnkiConnect URL override for default exports', async () => {
         const fetcher = new MockFetcher();
         fetcher.fetch.mockResolvedValue(ankiConnectResponse(321));
         const anki = new Anki(testAnkiSettings, fetcher);
 
-        await anki.export(makeExportArguments({ ankiConnectUrl: 'http://override:8765' }));
+        await anki.export(makeExportArguments({ ankiConnectUrl: 'http://override.example.com:5678' }));
 
         expect(fetcher.fetch).toHaveBeenCalledWith(
-            'http://override:8765',
+            'http://override.example.com:5678',
             expect.objectContaining({ action: 'addNote' })
         );
     });
@@ -1269,6 +1318,95 @@ describe('Anki', () => {
         ]);
     });
 
+    it.each(['different subtitle', '', '<span> </span>'])(
+        'updates consecutive same-subtitle notes and stops at a boundary sentence of %p',
+        async (boundarySentence) => {
+            const fetcher = new MockFetcher();
+            const sentences: Record<number, string> = {
+                11: '<b>foo</b> bar',
+                4: '<i>foo</i><br>bar',
+                3: 'foo&nbsp;bar',
+                2: boundarySentence,
+                1: 'foo bar',
+            };
+            fetcher.fetch.mockImplementation(async (_url, body) => {
+                switch (body.action) {
+                    case 'findNotes':
+                        return ankiConnectResponse([4, 1, 11, 2, 3]);
+                    case 'storeMediaFile':
+                        return ankiConnectResponse(
+                            body.params.filename.endsWith('.mp3') ? 'shared-audio.mp3' : 'shared-image.jpeg'
+                        );
+                    case 'notesInfo':
+                        return ankiConnectResponse(
+                            body.params.notes.map((noteId: number) =>
+                                makeNoteInfo({
+                                    noteId,
+                                    fields: {
+                                        Sentence: { value: sentences[noteId], order: 0 },
+                                        Word: { value: `word-${noteId}`, order: 1 },
+                                        Definition: { value: `definition-${noteId}`, order: 2 },
+                                    },
+                                })
+                            )
+                        );
+                    default:
+                        return ankiConnectResponse(null);
+                }
+            });
+            const anki = new Anki({ ...testAnkiSettings, updateLastCardForSameSubtitle: true }, fetcher);
+
+            await expect(
+                anki.export(
+                    makeExportArguments({
+                        mode: 'updateLast',
+                        text: 'foo\nbar',
+                        audioClip: makeAudioClip(),
+                        image: makeImage(),
+                        ankiConnectUrl: 'http://override.example.com:5678',
+                    })
+                )
+            ).resolves.toBe('word-11');
+
+            const requests = fetcher.fetch.mock.calls.map((call) => call[1]);
+            expect(requests[0].params).toEqual({ query: 'added:2' });
+            expect(requests.filter((request) => request.action === 'storeMediaFile')).toHaveLength(2);
+            const updates = requests.filter((request) => request.action === 'updateNoteFields');
+            expect(updates.map((request) => request.params.note.id)).toEqual([11, 4, 3]);
+            for (const update of updates.slice(1)) {
+                expect(update.params.note.fields).toEqual({
+                    Audio: '[sound:shared-audio.mp3]',
+                    Image: '<img src="shared-image.jpeg">',
+                });
+            }
+            expect(requests.filter((request) => request.action === 'addTags').map((request) => request.params)).toEqual(
+                [
+                    { notes: [11], tags: 'tag-a tag-b' },
+                    { notes: [4], tags: 'tag-a tag-b' },
+                    { notes: [3], tags: 'tag-a tag-b' },
+                ]
+            );
+            expect(fetcher.fetch.mock.calls.every((call) => call[0] === 'http://override.example.com:5678')).toBe(true);
+        }
+    );
+
+    it('only updates the latest note when no sentence field is configured', async () => {
+        const fetcher = new MockFetcher();
+        fetcher.fetch.mockResolvedValueOnce(ankiConnectResponse([11, 4]));
+        fetcher.fetch.mockResolvedValueOnce(ankiConnectResponse([makeNoteInfo({ noteId: 11 })]));
+        fetcher.fetch.mockResolvedValueOnce(ankiConnectResponse(null));
+        const anki = new Anki({ ...testAnkiSettings, sentenceField: '', updateLastCardForSameSubtitle: true }, fetcher);
+
+        await anki.export(makeExportArguments({ mode: 'updateLast', tags: [] }));
+
+        expect(fetcher.fetch.mock.calls.map((call) => call[1].action)).toEqual([
+            'findNotes',
+            'notesInfo',
+            'updateNoteFields',
+        ]);
+        expect(fetcher.fetch.mock.calls[2][1].params.note.id).toBe(11);
+    });
+
     it('uses the per-export AnkiConnect URL override throughout updateLast exports', async () => {
         const fetcher = new MockFetcher();
         fetcher.fetch.mockResolvedValueOnce(ankiConnectResponse([8]));
@@ -1278,16 +1416,16 @@ describe('Anki', () => {
 
         await anki.export(
             makeExportArguments({
-                ankiConnectUrl: 'http://override:8765',
+                ankiConnectUrl: 'http://override.example.com:5678',
                 tags: [],
                 mode: 'updateLast',
             })
         );
 
         expect(fetcher.fetch.mock.calls.map((call) => call[0])).toEqual([
-            'http://override:8765',
-            'http://override:8765',
-            'http://override:8765',
+            'http://override.example.com:5678',
+            'http://override.example.com:5678',
+            'http://override.example.com:5678',
         ]);
     });
 
@@ -1619,7 +1757,7 @@ describe('refreshing the Anki card browser after an update', () => {
 
         await expect(anki.export(exportArguments('updateLast'))).resolves.toBe(42);
         expect(consoleError).toHaveBeenCalledWith(
-            '[asbplayer][anki/connect]',
+            expect.stringContaining('[asbplayer][anki/connect]'),
             'Failed to refresh Anki card browser after updating note:',
             expect.any(Error)
         );

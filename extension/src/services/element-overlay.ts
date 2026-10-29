@@ -1,5 +1,6 @@
 import { OffscreenDomCache } from '@project/common';
 import { ASB_TOKEN_CONTAINER_CLASS } from '@project/common/annotations/dom-annotations';
+import type { SubtitlesWidthUnit } from '@project/common/settings';
 
 export enum OffsetAnchor {
     bottom,
@@ -20,7 +21,13 @@ export interface ElementOverlayParams {
     fullscreenContentClassName: string;
     offsetAnchor: OffsetAnchor;
     contentPositionOffset?: number;
-    contentWidthPercentage?: number;
+    // Width of the container: -1 means 'auto' (as wide as the video), undefined means
+    // 'leave the width alone'
+    contentWidth?: number;
+    contentWidthUnit?: SubtitlesWidthUnit;
+    // Overrides all container style behavior.
+    // If set, offsetAnchor, contentPositionOffset, contentWidth, and contentWidthUnit are ignored.
+    applyContainerStylesOverride?: (container: HTMLElement) => void;
     onContainerStyles?: (container: HTMLElement) => void;
     onMouseOver: (event: MouseEvent) => void;
     onMouseOut: (event: MouseEvent) => void;
@@ -38,7 +45,8 @@ export interface ElementOverlay {
     fullscreenContentClassName: string;
     offsetAnchor: OffsetAnchor;
     contentPositionOffset: number;
-    contentWidthPercentage?: number;
+    contentWidth?: number;
+    contentWidthUnit?: SubtitlesWidthUnit;
     displayingElements: () => Iterable<HTMLElement>;
     containerElement: HTMLElement | undefined;
 }
@@ -64,7 +72,8 @@ export class CachingElementOverlay implements ElementOverlay {
     private layoutAnimationFrame?: number;
     private onMouseOver: (event: MouseEvent) => void;
     private onMouseOut: (event: MouseEvent) => void;
-    private onContainerStyles?: (container: HTMLElement) => void;
+    private applyContainerStylesOverride?: (container: HTMLElement) => void;
+    private readonly onContainerStyles?: (container: HTMLElement) => void;
 
     nonFullscreenContainerClassName: string;
     nonFullscreenContentClassName: string;
@@ -72,7 +81,8 @@ export class CachingElementOverlay implements ElementOverlay {
     fullscreenContentClassName: string;
     offsetAnchor: OffsetAnchor = OffsetAnchor.bottom;
     contentPositionOffset: number;
-    contentWidthPercentage?: number;
+    contentWidth?: number;
+    contentWidthUnit: SubtitlesWidthUnit = '%';
 
     constructor({
         targetElement,
@@ -82,9 +92,11 @@ export class CachingElementOverlay implements ElementOverlay {
         fullscreenContentClassName,
         offsetAnchor,
         contentPositionOffset,
-        contentWidthPercentage,
+        contentWidth,
+        contentWidthUnit,
         onMouseOver,
         onMouseOut,
+        applyContainerStylesOverride,
         onContainerStyles,
     }: ElementOverlayParams) {
         this.targetElement = targetElement;
@@ -94,9 +106,11 @@ export class CachingElementOverlay implements ElementOverlay {
         this.fullscreenContentClassName = fullscreenContentClassName;
         this.offsetAnchor = offsetAnchor;
         this.contentPositionOffset = contentPositionOffset ?? 75;
-        this.contentWidthPercentage = contentWidthPercentage;
+        this.contentWidth = contentWidth;
+        this.contentWidthUnit = contentWidthUnit ?? '%';
         this.onMouseOver = onMouseOver;
         this.onMouseOut = onMouseOut;
+        this.applyContainerStylesOverride = applyContainerStylesOverride;
         this.onContainerStyles = onContainerStyles;
 
         // Necessary for token highlighting on hover
@@ -469,6 +483,12 @@ export class CachingElementOverlay implements ElementOverlay {
     }
 
     private _applyContainerStyles(container: HTMLElement, { fullscreen }: ApplyContainerStylesOptions) {
+        this.onContainerStyles?.(container);
+        if (this.applyContainerStylesOverride !== undefined) {
+            this.applyContainerStylesOverride?.(container);
+            return;
+        }
+
         const rect = this.targetElement.getBoundingClientRect();
         if (
             !Number.isFinite(rect.left) ||
@@ -514,19 +534,17 @@ export class CachingElementOverlay implements ElementOverlay {
         container.style.left = left + 'px';
         this._applyResponsiveContentStyles(container, rect.width);
 
-        if (this.contentWidthPercentage === -1) {
+        if (this.contentWidth === -1) {
             container.style.maxWidth = rect.width + 'px';
             container.style.width = '';
-        } else if (this.contentWidthPercentage !== undefined) {
+        } else if (this.contentWidth !== undefined) {
             container.style.maxWidth = '';
-            container.style.width =
-                Math.min(window.innerWidth, (rect.width * this.contentWidthPercentage) / 100) + 'px';
+            const width = this.contentWidthUnit === 'px' ? this.contentWidth : (rect.width * this.contentWidth) / 100;
+            container.style.width = Math.min(window.innerWidth, width) + 'px';
         }
 
         container.style.top = top + 'px';
         container.style.bottom = '';
-
-        this.onContainerStyles?.(container);
     }
 
     private _applyResponsiveContentStyles(container: HTMLElement, videoWidth: number) {

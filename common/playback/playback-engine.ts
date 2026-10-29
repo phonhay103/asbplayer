@@ -1,14 +1,34 @@
-import { defaultSettings, isTrackSeekable } from '@project/common/settings';
+import { formatAsSignedMs, minimumPlaybackRate, normalizePlaybackRate } from '@project/common/util';
+import PlaybackModeController, {
+    playbackModesFromSettings,
+} from '@project/common/playback/controllers/playback-mode-controller';
+import AutoPauseController, {
+    formatAutoPauseResumeModeNotification,
+    nextAutoPauseResumeMode,
+} from '@project/common/playback/controllers/auto-pause-controller';
+import SubtitleVisibilityController, {
+    formatSubtitleVisibilityNotification,
+    nextSubtitleVisibility,
+} from '@project/common/playback/controllers/subtitle-visibility-controller';
+import type { PlayModeTransition } from '@project/common/playback/controllers/playback-mode-controller';
+import type { AutoPauseResumeModeNotification } from '@project/common/playback/controllers/auto-pause-controller';
+import type { SubtitleVisibilityNotification } from '@project/common/playback/controllers/subtitle-visibility-controller';
+
+import { activeRecipe, effectiveSettings, defaultSettings, isTrackSeekable } from '@project/common/settings';
 import type { AsbplayerSettings, SettingsProvider } from '@project/common/settings';
-import type { IndexedSubtitleModel, PlaybackState } from '@project/common';
+
 import { PlayMode } from '@project/common';
-import { asbWarn, formatAsSignedMs } from '@project/common/util';
+import type { IndexedSubtitleModel, PlaybackState } from '@project/common';
+
+import { asbError, asbTrace, asbWarn } from '@project/common/util/log';
+
 import {
     buildPlaybackPlan,
     playbackPlansEqual,
     playbackPlanCorrectionToleranceMs,
 } from '@project/common/playback/plan/playback-plan';
 import type { PlaybackPlan } from '@project/common/playback/plan/playback-plan';
+
 import PlaybackPlanExecutor, {
     maximumInternalSeekMismatchMs,
 } from '@project/common/playback/plan/playback-plan-executor';
@@ -16,44 +36,38 @@ import type {
     PlaybackPlanExecutorCallbacks,
     PlaybackTimelineTransitionCause,
 } from '@project/common/playback/plan/playback-plan-executor';
-import PlaybackModeController, {
-    minimumPlaybackRate,
-    normalizePlaybackRate,
-    playbackModesFromSettings,
-} from '@project/common/playback/controllers/playback-mode-controller';
-import type { PlayModeTransition } from '@project/common/playback/controllers/playback-mode-controller';
-import AutoPauseController, {
-    formatAutoPauseResumeModeNotification,
-    nextAutoPauseResumeMode,
-} from '@project/common/playback/controllers/auto-pause-controller';
-import type { AutoPauseResumeModeNotification } from '@project/common/playback/controllers/auto-pause-controller';
+
 import PlaybackPositionController from '@project/common/playback/controllers/playback-position-controller';
 import PlaybackStateController from '@project/common/playback/controllers/playback-state-controller';
-import SubtitleVisibilityController, {
-    formatSubtitleVisibilityNotification,
-    nextSubtitleVisibility,
-} from '@project/common/playback/controllers/subtitle-visibility-controller';
-import type { SubtitleVisibilityNotification } from '@project/common/playback/controllers/subtitle-visibility-controller';
+import TokenSelectionController from '@project/common/playback/controllers/token-selection-controller';
+import type { TokenSelectionControllerCallbacks } from '@project/common/playback/controllers/token-selection-controller';
+
 import type { TimingDriver } from '@project/common/playback/timing/timing-driver';
 import { CachedLocalStorage } from '@project/common/app/services/cached-local-storage';
 
 const internalSeekWatchdogMs = 10_000;
 const subtitleOffsetStorageKey = 'offset';
 const initialPlaybackSettingsAutoHideDurationMs = 6000;
-const playbackRateNotificationKey = 'playback-rate';
 const subtitleOffsetNotificationKey = 'subtitle-offset';
 
-export interface SubtitleOffsetOptions {
-    readonly notifyPlayer: boolean;
-}
+const playbackPlanTraceDetails = <T extends IndexedSubtitleModel>(plan: PlaybackPlan<T>) => ({
+    durationMs: plan.timelineSubtitles.durationMs,
+    displaySubtitleCount: plan.timelineSubtitles.displaySubtitles.length,
+    timelineBlockCount: plan.timelineSubtitles.blocks.length,
+    playbackRate: plan.playbackRate,
+    condensed: plan.condensed !== undefined,
+    fastForwardPlaybackRate: plan.fastForward?.playbackRate,
+    autoPauseResumeMode: plan.autoPause?.resume.mode,
+    subtitleVisibility: plan.subtitleVisibility,
+});
 
-export interface InitialPlaybackSettings {
-    readonly autoHideDuration: number;
-    readonly playbackRate: number;
-    readonly subtitleOffset: number;
-    readonly playbackModeTransition: PlayModeTransition;
-    readonly notifications: InitialPlaybackSettingsNotifications;
-}
+const playbackModeTransitionTraceDetails = ({ modes, added, removed }: PlayModeTransition) => ({
+    modes: [...modes],
+    added: [...added],
+    removed: [...removed],
+});
+
+const playbackRateNotificationKey = 'playback-rate';
 
 export interface PlaybackRateNotification {
     readonly key: typeof playbackRateNotificationKey;
@@ -71,6 +85,32 @@ export function formatPlaybackRateNotification(playbackRate: number, locKey: str
     };
 }
 
+type Localizer = (locKey: string, replacements?: Record<string, unknown>) => string;
+
+export const formatRecipeNotification = (name: string | null) => ({
+    key: 'recipe',
+    text: (localize: Localizer) =>
+        localize('recipes.notification', { name: name ?? localize('pauseOnHoverMode.disabled') }),
+});
+
+export const formatRecipeSettingLockedNotification = (settingLocKey: string) => ({
+    key: 'recipe-setting-locked',
+    text: (localize: Localizer) => localize('recipes.settingLocked', { setting: localize(settingLocKey) }),
+});
+
+export interface SubtitleOffsetOptions {
+    readonly notifyPlayer: boolean;
+}
+
+export interface InitialPlaybackSettings {
+    readonly autoHideDuration: number;
+    readonly playbackRate: number;
+    readonly subtitleOffset: number;
+    readonly playbackModeTransition: PlayModeTransition;
+    readonly notifications: InitialPlaybackSettingsNotifications;
+    readonly recipeName: string | null;
+}
+
 export type InitialPlaybackNotification =
     | { readonly type: 'message'; readonly message: string }
     | { readonly type: 'translation'; readonly notification: PlaybackRateNotification };
@@ -79,8 +119,12 @@ export interface InitialPlaybackSettingsNotifications {
     readonly offsetAndRate: InitialPlaybackNotification[];
 }
 
+type PlaybackRateSetting = 'playbackRate' | 'fastForwardModePlaybackRate';
+
 export interface PlaybackEngineCallbacks {
     readonly pause: () => void;
+    readonly selectToken: TokenSelectionControllerCallbacks['selectToken'];
+    readonly clearAutoPauseTokenSelection: () => void;
     readonly play: () => Promise<void>;
     readonly seek: (timestampMs: number) => Promise<void>;
     readonly setPlaybackRate: (playbackRate: number) => void;
@@ -92,6 +136,8 @@ export interface PlaybackEngineCallbacks {
     readonly playbackStateChanged: (state: PlaybackState) => void;
     readonly playbackPositionChanged: (position: number | undefined) => void;
     readonly saveSettings: (settings: Partial<AsbplayerSettings>) => void;
+    readonly recipeChanged: (name: string | null, transition: PlayModeTransition) => void;
+    readonly settingChangeBlocked: (settingLocKey: string) => void;
     readonly playbackModesChanged: (transition: PlayModeTransition) => void;
     readonly initialPlaybackSettingsChanged: (settings: InitialPlaybackSettings) => void;
     readonly onError: (error: unknown) => void;
@@ -126,6 +172,7 @@ export interface PlaybackEngineOptions<T extends IndexedSubtitleModel> {
  *     ├── PlaybackPositionController
  *     ├── AutoPauseController
  *     ├── SubtitleVisibilityController
+ *     ├── TokenSelectionController
  *     ├── PlaybackPlan
  *     └── PlaybackPlanExecutor
  *         ├── PlaybackTimeline
@@ -136,6 +183,8 @@ export interface PlaybackEngineOptions<T extends IndexedSubtitleModel> {
  */
 export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     private settings: AsbplayerSettings;
+    private underlyingSettings: AsbplayerSettings = defaultSettings;
+    private underlyingPlaybackModes?: Set<PlayMode>;
     private readonly appIntegration: boolean;
     private readonly autoPauseCorrectionDisabled: boolean;
     private readonly subtitleOffsetStorage = new CachedLocalStorage();
@@ -152,6 +201,7 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     private readonly autoPauseController: AutoPauseController;
     private readonly subtitleVisibilityController: SubtitleVisibilityController;
     private readonly playbackStateController: PlaybackStateController<T>;
+    private readonly tokenSelectionController: TokenSelectionController;
     private autoPauseTimestampMs?: number;
     private readonly settingsProvider: SettingsProvider;
     private unbindOperationId = 0;
@@ -173,6 +223,14 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         callbacks,
         timingDriver,
     }: PlaybackEngineOptions<T>) {
+        asbTrace('playback/lifecycle', 'Creating playback engine', {
+            appIntegration,
+            autoPauseCorrectionDisabled,
+            playbackModesDisabled,
+            playbackModesSuppressed,
+            playbackPositionKeyCount: playbackPositionKeys.length,
+            subtitleCount: subtitles.length,
+        });
         this.settings = defaultSettings;
         this.appIntegration = appIntegration;
         this.autoPauseCorrectionDisabled = autoPauseCorrectionDisabled;
@@ -186,34 +244,50 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         this.timingDriver = timingDriver;
         this.plan = this.buildPlan();
         this.subtitleVisibilityController = new SubtitleVisibilityController({
+            automaticallyPaused: () => this.autoPauseController.automaticallyPaused,
             visibilityChanged: () => {
                 if (!this.timingDriver.bound) return;
+                asbTrace('playback/subtitles', 'Subtitle visibility state changed', {
+                    subtitlesVisible: this.subtitleVisibilityController.subtitlesVisible,
+                    timestampMs: this.timingDriver.currentTimeMs(),
+                });
                 this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: true });
             },
         });
-        this.subtitleVisibilityController.replacePlan(this.plan.subtitleVisibility, this.timingDriver.paused());
         this.autoPauseController = new AutoPauseController({
             play: callbacks.play,
             resumeDelayStarted: () => this.subtitleVisibilityController.autoPauseResumeDelayStarted(),
             autoResumeFailed: () => {
+                this.tokenSelectionController.cancel();
                 const snapshotCleared = this.clearAutoPauseTimestamp();
-                this.subtitleVisibilityController.autoPauseCancelled(this.timingDriver.paused());
+                asbTrace('playback/auto-pause', 'Automatic playback resume failed', {
+                    snapshotCleared,
+                    timestampMs: this.timingDriver.currentTimeMs(),
+                });
+                this.subtitleVisibilityController.autoPauseCancelled({ paused: this.timingDriver.paused() });
                 if (snapshotCleared && this.timingDriver.bound) {
                     this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: false });
                 }
             },
-            onError: callbacks.onError,
+            onError: (error) => {
+                asbTrace('playback/error', 'Auto-pause controller error', { error });
+                callbacks.onError(error);
+            },
         });
         this.autoPauseController.replacePlan(this.plan.autoPause?.resume);
+        this.subtitleVisibilityController.replacePlan(this.plan.subtitleVisibility, {
+            paused: this.timingDriver.paused(),
+        });
 
         const executorCallbacks: PlaybackPlanExecutorCallbacks<T> = {
             play: callbacks.play,
             paused: () => this.timingDriver.paused(),
             pause: ({ timestampMs, playbackModeSubtitlesAtPause }) => {
                 this.autoPauseTimestampMs = timestampMs;
-                this.subtitleVisibilityController.autoPaused();
                 this.autoPauseController.autoPaused(playbackModeSubtitlesAtPause);
+                this.subtitleVisibilityController.autoPaused();
                 callbacks.pause();
+                this.tokenSelectionController.autoPaused(timestampMs);
                 void this.playbackPositionController.savePlaybackPosition(this.timingDriver.currentTimeMs());
             },
             seek: (targetTimestampMs) => this.seek(targetTimestampMs),
@@ -232,12 +306,26 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
                         actualPlaybackRate,
                     });
                 }
+                asbTrace('playback/rate', 'Applied playback plan rate command', {
+                    actualPlaybackRate,
+                    requestedPlaybackRate: playbackRate,
+                    timestampMs: this.timingDriver.currentTimeMs(),
+                });
             },
             correctAutoPause: async (targetTimestampMs) => {
                 return this.correctTimestamp(targetTimestampMs, 'pause-correction');
             },
         };
         this.executor = new PlaybackPlanExecutor(this.plan, this.timingDriver.currentTimeMs(), executorCallbacks);
+        this.tokenSelectionController = new TokenSelectionController(this.plan.tokenSelection, {
+            paused: () => this.timingDriver.paused(),
+            automaticallyPaused: () => this.autoPauseController.automaticallyPaused,
+            subtitlesVisible: () => this.subtitleVisibilityController.subtitlesVisible,
+            showingSubtitlesAt: (timestampMs) => this.executor.showingSubtitlesAt(timestampMs),
+            hideSubtitlesForRepeatAt: (timestampMs) => this.executor.hideSubtitlesForRepeatAt(timestampMs),
+            selectToken: callbacks.selectToken,
+            clearPauseTokenSelection: callbacks.clearAutoPauseTokenSelection,
+        });
         this.playbackPositionController = new PlaybackPositionController({
             playbackPositionKeys,
             currentTimeMs: () => this.timingDriver.currentTimeMs(),
@@ -254,15 +342,23 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
                 playbackPositionsChanged: (positions) => {
                     this.settings = { ...this.settings, lastPlaybackPositions: [...positions] };
                 },
-                onError: callbacks.onError,
+                onError: (error) => {
+                    asbTrace('playback/error', 'Playback position controller error', { error });
+                    callbacks.onError(error);
+                },
             },
             settingsProvider,
         });
         this.playbackStateController = new PlaybackStateController({
             paused: () => this.timingDriver.paused(),
+            automaticallyPaused: () => this.autoPauseController.automaticallyPaused,
             showingSubtitlesAt: (timestampMs) =>
                 this.executor.showingSubtitlesAt(this.autoPauseTimestampMs ?? timestampMs),
             subtitlesVisible: () => this.subtitleVisibilityController.subtitlesVisible,
+            hiddenSubtitleIndexesAt: (timestampMs) =>
+                this.executor.hiddenSubtitleIndexesAt(this.autoPauseTimestampMs ?? timestampMs),
+            hideSubtitlesForRepeatAt: (timestampMs) =>
+                this.executor.hideSubtitlesForRepeatAt(this.autoPauseTimestampMs ?? timestampMs),
             invisibleSubtitlesAt: (timestampMs) =>
                 this.executor.invisibleSubtitlesAt(this.autoPauseTimestampMs ?? timestampMs),
             playbackStateChanged: callbacks.playbackStateChanged,
@@ -280,9 +376,13 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
                 }
             },
             onPlaybackPaused: () => {
+                const timestampMs = this.timingDriver.currentTimeMs();
+                asbTrace('playback/state', 'Playback paused', {
+                    playbackRate: this.timingDriver.playbackRate(),
+                    timestampMs,
+                });
                 this.subtitleVisibilityController.playbackPaused();
                 this.playbackPositionController.playbackPaused();
-                const timestampMs = this.timingDriver.currentTimeMs();
                 this.playbackStateController.reconcileAndNotify(
                     timestampMs,
                     (reconcileTimestampMs) => {
@@ -290,35 +390,57 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
                     },
                     { force: true }
                 );
+                this.tokenSelectionController.playbackPaused(timestampMs);
             },
             onSeekStarted: (cause) => this.seekStartedWithCause(cause),
             onDiscontinuity: (currentTimestampMs) => {
                 this.playbackPositionController.discontinuity(currentTimestampMs);
                 const { cause } = this.executor.handleDiscontinuity(currentTimestampMs);
                 if (cause !== 'internal-seek') {
+                    asbTrace('playback/seek', 'Playback discontinuity handled', {
+                        cause,
+                        timestampMs: currentTimestampMs,
+                    });
+                    this.tokenSelectionController.seekStarted();
                     this.clearAutoPauseTimestamp();
                     this.autoPauseController.userSeeked();
-                    this.subtitleVisibilityController.userSeeked(this.timingDriver.paused());
+                    this.subtitleVisibilityController.userSeeked({ paused: this.timingDriver.paused() });
                 }
                 this.playbackStateController.notify(currentTimestampMs, { force: true });
+                if (cause !== 'internal-seek') this.tokenSelectionController.seeked(currentTimestampMs);
             },
             onCancel: (options) => this.executor.cancelPendingOperations(options),
             onPlaybackStarted: async () => {
+                asbTrace('playback/state', 'Playback started', {
+                    playbackRate: this.timingDriver.playbackRate(),
+                    timestampMs: this.timingDriver.currentTimeMs(),
+                });
                 this.clearAutoPauseTimestamp();
+                this.tokenSelectionController.playbackStarted();
                 this.autoPauseController.playbackStarted();
                 this.subtitleVisibilityController.playbackStarted();
                 await this.executor.playbackStarted();
                 this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: true });
             },
-            onError: callbacks.onError,
+            onError: (error) => {
+                asbTrace('playback/error', 'Playback timing error', { error });
+                callbacks.onError(error);
+            },
         });
         this.initializeSettings();
+        asbTrace('playback/lifecycle', 'Created playback engine', {
+            ready: this.ready,
+            plan: playbackPlanTraceDetails(this.plan),
+        });
     }
 
     private initializeSettings(): void {
         if (this.ready.settings) return;
         const unbindOperationId = this.unbindOperationId;
         if (this.settingsInitialization?.unbindOperationId === unbindOperationId) return;
+        asbTrace('playback/settings', 'Starting playback settings initialization', {
+            unbindOperationId,
+        });
         const promise = this.loadSettings(unbindOperationId);
         this.settingsInitialization = { unbindOperationId, promise };
         void promise.finally(() => {
@@ -333,17 +455,44 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
                 const settings = await this.settingsProvider.getAll();
                 const activeProfile = await this.settingsProvider.activeProfile();
                 const profile = activeProfile?.name;
-                if (settingsChangedOperationId !== this.settingsChangedOperationId) continue;
-                if (unbindOperationId !== this.unbindOperationId) return;
-                this.settings = settings;
+                if (settingsChangedOperationId !== this.settingsChangedOperationId) {
+                    asbTrace(
+                        'playback/settings',
+                        'Retrying playback settings initialization after a concurrent update',
+                        {
+                            requestedSettingsChangedOperationId: settingsChangedOperationId,
+                            currentSettingsChangedOperationId: this.settingsChangedOperationId,
+                        }
+                    );
+                    continue;
+                }
+                if (unbindOperationId !== this.unbindOperationId) {
+                    asbTrace('playback/settings', 'Discarding playback settings initialization after teardown', {
+                        unbindOperationId,
+                        currentUnbindOperationId: this.unbindOperationId,
+                    });
+                    return;
+                }
+                this.underlyingPlaybackModes = undefined;
+                this.underlyingSettings = settings;
+                this.settings = effectiveSettings(settings);
                 this.lastProfile = profile;
                 this.playbackPositionController.setSettings(this.settings);
                 this.ready.settings = true;
+                asbTrace('playback/settings', 'Playback settings initialized', {
+                    activeRecipeId: settings.activeRecipeId,
+                    recipeName: activeRecipe(this.settings)?.name ?? null,
+                    recipeSettingKeys: Object.keys(activeRecipe(this.settings)?.settings ?? {}),
+                    lastPlaybackModes: settings.lastPlaybackModes,
+                    profile,
+                    settingsChangedOperationId,
+                });
                 this.rebuildPlan();
                 this.bind();
                 return;
             }
         } catch (error) {
+            asbTrace('playback/error', 'Playback settings initialization failed', { error });
             this.callbacks.onError(error);
         }
     }
@@ -387,23 +536,27 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     bind(): void {
         if (this.timingDriver.bound) return;
         if (!this.ready.settings) {
+            asbTrace('playback/lifecycle', 'Deferring playback engine bind until settings are ready');
             this.initializeSettings();
             return;
         }
-        if (!this.ready.subtitles) return;
+        if (!this.ready.subtitles) {
+            asbTrace('playback/lifecycle', 'Deferring playback engine bind until subtitles are available');
+            return;
+        }
 
         this.playbackStateController.bind();
         this.timingDriver.bind();
         this.playbackPositionController.bind();
 
-        const playbackModeTransition = this.playbackModeController.setModes(playbackModesFromSettings(this.settings));
+        const playbackModeTransition = this.playbackModeController.setModes(this.recipePlaybackModes());
         this.timingDriver.onDurationChange();
         this.rebuildPlan({ initializePlaybackRate: true });
 
         const subtitleOffset = this.lastSubtitleOffset;
         this.callbacks.setSubtitleOffset(subtitleOffset, { notifyPlayer: false }, subtitleOffsetNotificationKey);
         const fastForwarding = this.executor.isFastForwarding;
-        const playbackRate = fastForwarding ? this.plan.fastForward!.playbackRate : this.plan.playbackRate;
+        const playbackRate = this.executor.playbackRate;
         const notifications = this.initialPlaybackSettingsNotifications({
             playbackRate,
             fastForwarding,
@@ -415,6 +568,17 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
             subtitleOffset,
             playbackModeTransition,
             notifications,
+            recipeName: activeRecipe(this.settings)?.name ?? null,
+        });
+        asbTrace('playback/lifecycle', 'Playback engine bound', {
+            activeRecipeId: this.settings.activeRecipeId,
+            recipeName: activeRecipe(this.settings)?.name ?? null,
+            initialPlaybackRate: playbackRate,
+            modeTransition: playbackModeTransitionTraceDetails(playbackModeTransition),
+            notifications: notifications.offsetAndRate.length,
+            playbackModes: [...this.playbackModeController.playModes],
+            subtitleOffset,
+            timestampMs: this.timingDriver.currentTimeMs(),
         });
         this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: true });
     }
@@ -425,6 +589,10 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
 
     profileChanged(profile?: string): void {
         if (this.lastProfile === profile) return;
+        asbTrace('playback/settings', 'Playback profile changed', {
+            previousProfile: this.lastProfile,
+            profile,
+        });
         this.teardown({ saveSettings: false });
         this.ready.settings = false;
         ++this.settingsChangedOperationId;
@@ -432,28 +600,42 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     }
 
     private teardown({ saveSettings }: { readonly saveSettings: boolean }): void {
+        const wasBound = this.timingDriver.bound;
+        asbTrace('playback/lifecycle', 'Tearing down playback engine', {
+            saveSettings,
+            timestampMs: wasBound ? this.timingDriver.currentTimeMs() : undefined,
+            wasBound,
+        });
         ++this.unbindOperationId;
+        this.tokenSelectionController.cancel('teardown');
         this.clearAutoPauseTimestamp();
         this.autoPauseController.cancel();
         this.subtitleVisibilityController.cancel();
         if (!saveSettings) this.playbackPositionController.profileChanged();
-        if (!this.timingDriver.bound) return;
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/lifecycle', 'Playback engine teardown finished while already unbound', { saveSettings });
+            return;
+        }
         this.playbackPositionController.unbind();
         this.timingDriver.unbind();
-        if (!saveSettings) return;
+        if (!saveSettings) {
+            asbTrace('playback/lifecycle', 'Playback engine unbound', { saveSettings });
+            return;
+        }
         // Need to update these as PlaybackEngine doesn't keep them all synced with external settings.
         // lastPlaybackPositions are managed by the playbackPositionController and should not be explicitly saved here.
         this.callbacks.saveSettings({
-            lastPlaybackModes: this.settings.lastPlaybackModes,
+            ...(!activeRecipe(this.settings) ? { lastPlaybackModes: this.settings.lastPlaybackModes } : {}),
             ...(this.appIntegration ? { lastSubtitleOffset: this.settings.lastSubtitleOffset } : {}),
-            rememberPlaybackRate: this.settings.rememberPlaybackRate, // This is done to ensure everyone is notified as its not in saveOnlySettings
-            ...(this.settings.rememberPlaybackRate
+            rememberPlaybackRate: this.underlyingSettings.rememberPlaybackRate, // This is done to ensure everyone is notified as its not in saveOnlySettings
+            ...(this.settings.rememberPlaybackRate && !activeRecipe(this.settings)
                 ? {
                       playbackRate: this.settings.playbackRate,
                       fastForwardModePlaybackRate: this.settings.fastForwardModePlaybackRate,
                   }
                 : {}),
         });
+        asbTrace('playback/lifecycle', 'Playback engine unbound', { saveSettings });
     }
 
     private calculateLastSubtitleEndMs(subtitles: readonly T[]): number | undefined {
@@ -462,46 +644,101 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     }
 
     settingsChanged(settings: AsbplayerSettings): void {
+        this.tokenSelectionController.cancel();
         ++this.settingsChangedOperationId;
-        if (!this.ready.settings) return;
+        if (!this.ready.settings) {
+            asbTrace('playback/settings', 'Deferring playback settings update until initialization completes', {
+                settingsChangedOperationId: this.settingsChangedOperationId,
+            });
+            return;
+        }
         const rememberPlaybackModesNow =
             !this.settings.rememberPlaybackModes && settings.rememberPlaybackModes && this.timingDriver.bound;
+        asbTrace('playback/settings', 'Applying playback settings update', {
+            bound: this.timingDriver.bound,
+            rememberPlaybackModesNow,
+            settingsChangedOperationId: this.settingsChangedOperationId,
+        });
         // PlaybackEngine is the single source of truth for these settings and may not push updates to the settings from outside.
         // For playbackRate, this has a side effect of ignoring changes in the UI for the current playback. This is acceptable and
         // means that playback rate in the UI is for init only, live playback rate changes must be through other means.
-        this.settings = {
+        const previousRecipeId = this.settings.activeRecipeId;
+        const previousRecipe = activeRecipe(this.settings);
+        if (!previousRecipe) {
+            this.underlyingSettings = this.settings;
+            this.underlyingPlaybackModes = this.timingDriver.bound ? this.playbackModeController.playModes : undefined;
+        }
+        this.underlyingSettings = {
             ...settings,
-            playbackRate: this.settings.playbackRate,
-            fastForwardModePlaybackRate: this.settings.fastForwardModePlaybackRate,
-            lastPlaybackModes: this.settings.lastPlaybackModes,
+            playbackRate: this.underlyingSettings.playbackRate,
+            fastForwardModePlaybackRate: this.underlyingSettings.fastForwardModePlaybackRate,
+            lastPlaybackModes: this.underlyingSettings.lastPlaybackModes,
             ...(this.appIntegration ? { lastSubtitleOffset: this.settings.lastSubtitleOffset } : {}),
         };
+        this.settings = effectiveSettings(this.underlyingSettings);
+        const recipe = activeRecipe(this.settings);
+        const recipeChanged = JSON.stringify(previousRecipe) !== JSON.stringify(recipe);
+        if (recipeChanged) {
+            const modes = recipe
+                ? new Set(recipe.playbackModes)
+                : (this.underlyingPlaybackModes ?? playbackModesFromSettings(this.underlyingSettings));
+            const transition = this.playbackModeController.setModes(modes);
+            const planChanged = this.rebuildPlan({ initializePlaybackRate: true });
+            asbTrace('playback/recipe', 'Playback recipe changed', {
+                previousRecipeId,
+                activeRecipeId: this.settings.activeRecipeId,
+                previousRecipeName: previousRecipe?.name ?? null,
+                recipeName: recipe?.name ?? null,
+                recipeSettingKeys: Object.keys(recipe?.settings ?? {}),
+                modeTransition: playbackModeTransitionTraceDetails(transition),
+                planChanged,
+            });
+            this.callbacks.recipeChanged(recipe?.name ?? null, transition);
+        }
         this.playbackPositionController.settingsChanged(this.settings);
         this.bind();
-        if (rememberPlaybackModesNow) {
-            this.applyPlaybackModeTransition(
-                this.playbackModeController.setModes(playbackModesFromSettings(this.settings)),
-                { savePlaybackModes: false, rebuildWhenUnchanged: true }
-            );
+        if (recipeChanged) return;
+        if (rememberPlaybackModesNow && !activeRecipe(this.settings)) {
+            this.applyPlaybackModeTransition(this.playbackModeController.setModes(this.recipePlaybackModes()), {
+                savePlaybackModes: false,
+                rebuildWhenUnchanged: true,
+            });
         } else {
             this.rebuildPlan();
         }
     }
 
-    playbackPositionKeysChanged(playbackPositionKeys: readonly string[]): void {
-        this.playbackPositionController.playbackPositionKeysChanged(playbackPositionKeys);
+    playbackPositionKeysChanged(playbackPositionKeys: readonly string[], options: { isNewSource: boolean }): void {
+        asbTrace('playback/position', 'Playback position keys changed', {
+            isNewSource: options.isNewSource,
+            keyCount: playbackPositionKeys.length,
+        });
+        this.playbackPositionController.playbackPositionKeysChanged(playbackPositionKeys, options);
     }
 
-    subtitlesChanged(subtitles: readonly T[]): void {
+    subtitlesChanged(
+        subtitles: readonly T[],
+        { timingChanged = true }: { readonly timingChanged?: boolean } = {}
+    ): void {
+        this.tokenSelectionController.cancel();
+        const previousSubtitleCount = this.subtitles.length;
         const hadSubtitles = this.ready.subtitles;
-        const snapshotCleared = this.clearAutoPauseTimestamp();
+        const snapshotCleared = timingChanged && this.clearAutoPauseTimestamp();
         this.subtitles = subtitles;
         this.lastSubtitleEndMs = this.calculateLastSubtitleEndMs(subtitles);
+        asbTrace('playback/subtitles', 'Playback subtitles changed', {
+            hadSubtitles,
+            newSubtitleCount: subtitles.length,
+            previousSubtitleCount,
+            snapshotCleared,
+            timingChanged,
+        });
         if (subtitles.length) {
             this.ready.subtitles = true;
             this.bind();
             if (hadSubtitles) {
                 const planChanged = this.rebuildPlan();
+                if (planChanged && !timingChanged) this.reevaluatePausedSelection();
                 if (!planChanged && snapshotCleared && this.timingDriver.bound) {
                     this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: false });
                 }
@@ -516,27 +753,123 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         }
     }
 
-    playbackRateChanged(playbackRate: number):
+    private reevaluatePausedSelection(): void {
+        if (!this.timingDriver.bound) return;
+        this.tokenSelectionController.reevaluatePausedSelection(
+            this.autoPauseTimestampMs ?? this.timingDriver.currentTimeMs()
+        );
+    }
+
+    private recipePlaybackModes(): Set<PlayMode> {
+        const recipe = activeRecipe(this.settings);
+        return recipe ? new Set(recipe.playbackModes) : playbackModesFromSettings(this.settings);
+    }
+
+    private recipeBlocks(
+        settingLocKey: string,
+        {
+            action,
+            requestedValue,
+            notifyBlocked = true,
+        }: { readonly action: string; readonly requestedValue?: number; readonly notifyBlocked?: boolean }
+    ): boolean {
+        const recipe = activeRecipe(this.settings);
+        if (!recipe) return false;
+        if (action !== 'change-playback-rate' || requestedValue !== this.executor.playbackRate || notifyBlocked) {
+            asbTrace('playback/recipe', 'Setting change blocked by playback recipe', {
+                activeRecipeId: this.settings.activeRecipeId,
+                recipeName: recipe.name,
+                settingLocKey,
+                action,
+                requestedValue,
+            });
+        }
+        if (notifyBlocked) this.callbacks.settingChangeBlocked(settingLocKey);
+        return true;
+    }
+
+    playbackRateChanged(
+        playbackRate: number,
+        { notifyBlocked = false }: { readonly notifyBlocked?: boolean } = {}
+    ):
         | {
               readonly notify: boolean;
+              /** Effective media rate, including adaptive interpolation. */
               readonly playbackRate: number;
               readonly notification: PlaybackRateNotification;
           }
         | undefined {
-        if (!this.timingDriver.bound) return;
-        const isFastForwarding = this.executor.isFastForwarding;
-        const setting = isFastForwarding ? 'fastForwardModePlaybackRate' : 'playbackRate';
-        const locKey = isFastForwarding ? 'info.fastForwardPlaybackRate' : 'info.playbackRate';
-        const notification = formatPlaybackRateNotification(this.settings[setting], locKey);
-        const normalizedPlaybackRate = normalizePlaybackRate(playbackRate);
-        if (normalizedPlaybackRate === undefined || this.settings[setting] === normalizedPlaybackRate) {
-            return { notify: false, playbackRate: this.settings[setting], notification };
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/rate', 'Ignoring playback rate change while unbound', { playbackRate });
+            return;
         }
-        this.settings = { ...this.settings, [setting]: normalizedPlaybackRate };
-        if (!this.rebuildPlan()) {
+        if (activeRecipe(this.settings)) {
+            this.recipeBlocks('settings.playbackRate', {
+                action: 'change-playback-rate',
+                requestedValue: playbackRate,
+                notifyBlocked,
+            });
+            if (this.timingDriver.playbackRate() !== this.executor.playbackRate) {
+                this.executor.reconcileAt(this.timingDriver.currentTimeMs(), { forcePlaybackRate: true });
+            }
+            const setting = this.playbackRateSetting();
             return {
                 notify: false,
-                playbackRate: this.settings[setting],
+                playbackRate: this.executor.playbackRate,
+                notification: formatPlaybackRateNotification(
+                    this.settings[setting],
+                    setting === 'fastForwardModePlaybackRate' ? 'info.fastForwardPlaybackRate' : 'info.playbackRate'
+                ),
+            };
+        }
+        const setting = this.playbackRateSetting();
+        if (playbackRate === this.executor.playbackRate) {
+            return this.updatePlaybackRateSetting(setting, this.settings[setting]);
+        }
+        return this.updatePlaybackRateSetting(setting, playbackRate);
+    }
+
+    private playbackRateSetting(): PlaybackRateSetting {
+        return this.executor.isFastForwarding || this.executor.comprehensionControlled
+            ? 'fastForwardModePlaybackRate'
+            : 'playbackRate';
+    }
+
+    private updatePlaybackRateSetting(
+        setting: PlaybackRateSetting,
+        playbackRate: number
+    ): ReturnType<typeof this.playbackRateChanged> {
+        const locKey = setting === 'fastForwardModePlaybackRate' ? 'info.fastForwardPlaybackRate' : 'info.playbackRate';
+        const notification = formatPlaybackRateNotification(this.settings[setting], locKey);
+        const normalizedPlaybackRate = normalizePlaybackRate(playbackRate);
+        if (normalizedPlaybackRate === undefined || normalizedPlaybackRate === this.settings[setting]) {
+            asbTrace('playback/rate', 'Ignoring unchanged or invalid playback rate', {
+                normalizedPlaybackRate,
+                requestedPlaybackRate: playbackRate,
+                setting,
+            });
+            if (this.timingDriver.playbackRate() !== this.executor.playbackRate) {
+                this.executor.reconcileAt(this.timingDriver.currentTimeMs(), { forcePlaybackRate: true });
+            }
+            return { notify: false, playbackRate: this.executor.playbackRate, notification };
+        }
+        const previousPlaybackRate = this.settings[setting];
+        this.settings = { ...this.settings, [setting]: normalizedPlaybackRate };
+        const planChanged = this.rebuildPlan();
+        asbTrace('playback/rate', 'Playback rate changed', {
+            comprehensionControlled: this.executor.comprehensionControlled,
+            effectivePlaybackRate: this.executor.playbackRate,
+            fastForwarding: this.executor.isFastForwarding,
+            planChanged,
+            previousPlaybackRate,
+            requestedPlaybackRate: playbackRate,
+            setting,
+            playbackRate: normalizedPlaybackRate,
+        });
+        if (!planChanged) {
+            return {
+                notify: false,
+                playbackRate: this.executor.playbackRate,
                 notification: formatPlaybackRateNotification(this.settings[setting], locKey),
             };
         }
@@ -545,13 +878,21 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         }
         return {
             notify: this.settings.playbackRateNotificationEnabled,
-            playbackRate: normalizedPlaybackRate,
+            playbackRate: this.executor.playbackRate,
             notification: formatPlaybackRateNotification(normalizedPlaybackRate, locKey),
         };
     }
 
     subtitleOffsetChanged(offset: number, options: SubtitleOffsetOptions): void {
-        if (!this.timingDriver.bound) return;
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/subtitles', 'Ignoring subtitle offset change while unbound', { offset });
+            return;
+        }
+        asbTrace('playback/subtitles', 'Subtitle offset changed', {
+            appIntegration: this.appIntegration,
+            notifyPlayer: options.notifyPlayer,
+            offset,
+        });
         if (this.appIntegration) {
             this.settings = { ...this.settings, lastSubtitleOffset: offset };
             this.callbacks.saveSettings({ lastSubtitleOffset: offset });
@@ -563,93 +904,158 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     }
 
     adjustPlaybackRate(delta: number): ReturnType<typeof this.playbackRateChanged> {
-        if (!this.timingDriver.bound) return;
-        const isFastForwarding = this.executor.isFastForwarding;
-        const playbackRate = isFastForwarding ? this.plan.fastForward!.playbackRate : this.plan.playbackRate;
-        const locKey = isFastForwarding ? 'info.fastForwardPlaybackRate' : 'info.playbackRate';
+        if (this.recipeBlocks('settings.playbackRate', { action: 'adjust-playback-rate', requestedValue: delta })) {
+            return;
+        }
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/rate', 'Ignoring playback rate adjustment while unbound', { delta });
+            return;
+        }
+        const setting = this.playbackRateSetting();
+        const playbackRate = this.settings[setting];
+        const locKey = setting === 'fastForwardModePlaybackRate' ? 'info.fastForwardPlaybackRate' : 'info.playbackRate';
         if (!delta || !Number.isFinite(delta)) {
+            asbTrace('playback/rate', 'Ignoring invalid playback rate adjustment', {
+                currentPlaybackRate: playbackRate,
+                delta,
+            });
             return {
                 notify: false,
-                playbackRate,
+                playbackRate: this.executor.playbackRate,
                 notification: formatPlaybackRateNotification(playbackRate, locKey),
             };
         }
-        return this.playbackRateChanged(playbackRate + delta);
+        return this.updatePlaybackRateSetting(setting, playbackRate + delta);
     }
 
     durationChanged(durationMs: number): void {
-        if (!Number.isFinite(durationMs) || durationMs === this.plan.timelineSubtitles.durationMs) return;
+        const previousDurationMs = this.plan.timelineSubtitles.durationMs;
+        if (!Number.isFinite(durationMs) || durationMs === previousDurationMs) {
+            asbTrace('playback/plan', 'Ignoring unchanged or invalid duration change', {
+                durationMs,
+                previousDurationMs,
+            });
+            return;
+        }
+        asbTrace('playback/plan', 'Playback duration changed', { durationMs, previousDurationMs });
         this.rebuildPlan();
     }
 
     playbackModesSuppressedChanged(suppressed: boolean): void {
-        if (this.playbackModesSuppressed === suppressed) return;
+        if (this.playbackModesSuppressed === suppressed) {
+            asbTrace('playback/mode', 'Ignoring unchanged playback mode suppression', { suppressed });
+            return;
+        }
+        asbTrace('playback/mode', 'Playback mode suppression changed', {
+            previousSuppressed: this.playbackModesSuppressed,
+            suppressed,
+        });
         this.playbackModesSuppressed = suppressed;
         this.rebuildPlan();
     }
 
     togglePlaybackMode(targetMode: PlayMode): void {
-        if (!this.timingDriver.bound) return;
+        if (
+            this.recipeBlocks('settings.playbackModes', { action: 'toggle-playback-mode', requestedValue: targetMode })
+        ) {
+            return;
+        }
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/mode', 'Ignoring playback mode toggle while unbound', { targetMode });
+            return;
+        }
         const transition = this.playbackModeController.transition(targetMode);
         this.applyPlaybackModeTransition(transition, { savePlaybackModes: true, rebuildWhenUnchanged: false });
     }
 
     cycleAutoPauseResumeMode(): AutoPauseResumeModeNotification | undefined {
-        if (!this.timingDriver.bound) return;
+        if (this.recipeBlocks('settings.autoPauseResumeMode', { action: 'cycle-auto-pause-resume-mode' })) return;
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/auto-pause', 'Ignoring auto-pause resume mode change while unbound');
+            return;
+        }
         const autoPauseResumeMode = nextAutoPauseResumeMode(this.settings.autoPauseResumeMode);
         this.settings = { ...this.settings, autoPauseResumeMode };
-        this.rebuildPlan();
+        const planChanged = this.rebuildPlan();
         this.callbacks.saveSettings({ autoPauseResumeMode });
+        asbTrace('playback/auto-pause', 'Auto-pause resume mode changed', {
+            autoPauseResumeMode,
+            planChanged,
+        });
         return formatAutoPauseResumeModeNotification(autoPauseResumeMode);
     }
 
     toggleSubtitleVisibility(): SubtitleVisibilityNotification | undefined {
-        if (!this.timingDriver.bound) return;
+        if (this.recipeBlocks('settings.subtitleVisibility', { action: 'toggle-subtitle-visibility' })) return;
+        if (!this.timingDriver.bound) {
+            asbTrace('playback/subtitles', 'Ignoring subtitle visibility toggle while unbound');
+            return;
+        }
         const subtitleVisibility = nextSubtitleVisibility(this.settings.subtitleVisibility);
         this.settings = { ...this.settings, subtitleVisibility };
-        this.rebuildPlan();
+        const planChanged = this.rebuildPlan();
         this.callbacks.saveSettings({ subtitleVisibility });
+        asbTrace('playback/subtitles', 'Subtitle visibility changed', {
+            planChanged,
+            subtitleVisibility,
+        });
         return formatSubtitleVisibilityNotification(subtitleVisibility);
     }
 
     dismissPlaybackPosition(): void {
+        asbTrace('playback/position', 'Dismissing remembered playback position');
         this.playbackPositionController.dismissPlaybackPosition();
     }
 
     async resumePlaybackPosition(): Promise<void> {
-        await this.playbackPositionController.resumePlaybackPosition();
+        asbTrace('playback/position', 'Resuming remembered playback position');
+        try {
+            await this.playbackPositionController.resumePlaybackPosition();
+            asbTrace('playback/position', 'Finished resuming remembered playback position', {
+                timestampMs: this.timingDriver.currentTimeMs(),
+            });
+        } catch (error) {
+            asbError('playback/error', 'Failed to resume remembered playback position', { error });
+            throw error;
+        }
     }
 
     /** Reports a discontinuity from a non-standard media adapter, such as Disney+'s page-script seek event. */
     seeked(timestampMs: number): void {
         if (this.timingDriver.externalSeekEvents) {
+            asbTrace('playback/seek', 'Received external seek completion', { timestampMs });
             this.timingDriver.externalSeeked!(timestampMs);
             return;
         }
         const { cause } = this.executor.handleDiscontinuity(timestampMs);
         if (cause !== 'internal-seek') {
+            this.tokenSelectionController.seekStarted();
             this.clearAutoPauseTimestamp();
             this.autoPauseController.userSeeked();
-            this.subtitleVisibilityController.userSeeked(this.timingDriver.paused());
+            this.subtitleVisibilityController.userSeeked({ paused: this.timingDriver.paused() });
         }
         this.playbackStateController.notify(timestampMs, { force: true });
+        if (cause !== 'internal-seek') this.tokenSelectionController.seeked(timestampMs);
     }
 
     /** Reports that a seek operation has started from a non-standard media adapter, such as Disney+'s page-script seek event. */
     seekStarted(): void {
         if (this.timingDriver.externalSeekEvents) {
+            asbTrace('playback/seek', 'Received external seek start');
             this.timingDriver.externalSeekStarted!();
             return;
         }
+        asbTrace('playback/seek', 'Received seek start');
         this.seekStartedWithCause('user-seek');
         this.executor.cancelPendingOperations({ preserveExpectedDiscontinuity: false });
     }
 
     private seekStartedWithCause(cause: PlaybackTimelineTransitionCause): void {
         if (cause === 'internal-seek') return;
+        this.tokenSelectionController.seekStarted();
         const snapshotCleared = this.clearAutoPauseTimestamp();
         this.autoPauseController.userSeeked();
-        this.subtitleVisibilityController.userSeeked(this.timingDriver.paused());
+        this.subtitleVisibilityController.userSeeked({ paused: this.timingDriver.paused() });
         if (snapshotCleared && this.timingDriver.bound) {
             this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: false });
         }
@@ -658,9 +1064,11 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     /** Reports that a seek operation has been canceled from a non-standard media adapter, such as Disney+'s page-script seek event. */
     seekCanceled(): void {
         if (this.timingDriver.externalSeekEvents) {
+            asbTrace('playback/seek', 'Received external seek cancellation');
             this.timingDriver.externalSeekCanceled!();
             return;
         }
+        asbTrace('playback/seek', 'Received seek cancellation');
         this.timingDriver.cancelExpectedInternalSeek();
         this.executor.cancelPendingOperations({ preserveExpectedDiscontinuity: false });
     }
@@ -684,6 +1092,7 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
             subtitleTriggerGapEndOffset: this.settings.subtitleTriggerGapEndOffset,
             subtitleTriggerGapStartOffset: this.settings.subtitleTriggerGapStartOffset,
             repeatCountPreference: this.settings.repeatCountPreference,
+            repeatsBeforeShowingSubtitles: this.settings.repeatsBeforeShowingSubtitles,
             condensedPlaybackMinimumSkipIntervalMs: this.settings.streamingCondensedPlaybackMinimumSkipIntervalMs,
             playbackRate: this.settings.playbackRate,
             fastForwardModePlaybackRate: this.settings.fastForwardModePlaybackRate,
@@ -695,6 +1104,7 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
             autoPauseMaximumDurationMs: this.settings.autoPauseMaximumDurationMs,
             autoPauseTimePerCharacterMs: this.settings.autoPauseTimePerCharacterMs,
             subtitleVisibility: this.settings.subtitleVisibility,
+            dictionaryTracks: this.settings.dictionaryTracks,
         });
     }
 
@@ -707,18 +1117,29 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     private rebuildPlan(options: { readonly initializePlaybackRate?: boolean } = {}): boolean {
         const plan = this.buildPlan();
         const planChanged = !playbackPlansEqual(this.plan, plan);
+        asbTrace('playback/plan', 'Rebuilt playback plan', {
+            currentTimestampMs: this.timingDriver.bound ? this.timingDriver.currentTimeMs() : undefined,
+            initializePlaybackRate: options.initializePlaybackRate === true,
+            plan: playbackPlanTraceDetails(plan),
+            planChanged,
+            playbackModes: [...this.playbackModeController.playModes],
+            playbackModesSuppressed: this.playbackModesSuppressed,
+        });
         if (planChanged) {
             const subtitleVisibilityChanged = this.plan.subtitleVisibility !== plan.subtitleVisibility;
             this.plan = plan;
             const autoPauseResumeChanged = this.autoPauseController.replacePlan(this.plan.autoPause?.resume);
             if (autoPauseResumeChanged || subtitleVisibilityChanged) this.clearAutoPauseTimestamp();
-            this.subtitleVisibilityController.replacePlan(this.plan.subtitleVisibility, this.timingDriver.paused());
+            this.subtitleVisibilityController.replacePlan(this.plan.subtitleVisibility, {
+                paused: this.timingDriver.paused(),
+            });
             if (autoPauseResumeChanged) {
-                this.subtitleVisibilityController.autoPauseCancelled(this.timingDriver.paused());
+                this.subtitleVisibilityController.autoPauseCancelled({ paused: this.timingDriver.paused() });
             }
             this.executor.replacePlan(this.plan, this.timingDriver.currentTimeMs(), {
                 forcePlaybackRate: options.initializePlaybackRate,
             });
+            this.tokenSelectionController.replacePlan(this.plan.tokenSelection);
             if (this.timingDriver.bound) {
                 this.playbackStateController.notify(this.timingDriver.currentTimeMs(), { force: true });
             }
@@ -738,6 +1159,11 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         transition: PlayModeTransition,
         options: { readonly savePlaybackModes: boolean; readonly rebuildWhenUnchanged: boolean }
     ): void {
+        asbTrace('playback/mode', 'Applying playback mode transition', {
+            ...playbackModeTransitionTraceDetails(transition),
+            rebuildWhenUnchanged: options.rebuildWhenUnchanged,
+            savePlaybackModes: options.savePlaybackModes,
+        });
         if (!transition.added.size && !transition.removed.size) {
             if (options.rebuildWhenUnchanged) this.rebuildPlan();
             return;
@@ -753,6 +1179,12 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
 
     private async seek(timestampMs: number): Promise<void> {
         const targetTimestampMs = this.clampTimestamp(timestampMs);
+        if (targetTimestampMs !== timestampMs) {
+            asbTrace('playback/seek', 'Clamped seek target', {
+                requestedTimestampMs: timestampMs,
+                targetTimestampMs,
+            });
+        }
         await this.performSeek(targetTimestampMs, 'seek');
     }
 
@@ -770,10 +1202,20 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
     }
 
     private async performSeek(targetTimestampMs: number, warningCommand: 'seek' | 'pause-correction'): Promise<void> {
+        if (warningCommand === 'seek') {
+            asbTrace('playback/seek', 'Starting internal seek', {
+                currentTimestampMs: this.timingDriver.currentTimeMs(),
+                targetTimestampMs,
+            });
+        }
         const seekCompletion = this.timingDriver.beginInternalSeek();
         let watchdogHandle: ReturnType<typeof setTimeout> | undefined;
         const watchdog = new Promise<'cancelled'>((resolve) => {
             watchdogHandle = setTimeout(() => {
+                asbTrace('playback/seek', 'Internal seek watchdog timed out', {
+                    targetTimestampMs,
+                    timeoutMs: internalSeekWatchdogMs,
+                });
                 asbWarn('playback/seek', 'Internal seek did not complete before the watchdog timeout', {
                     targetTimestampMs,
                     timeoutMs: internalSeekWatchdogMs,
@@ -784,7 +1226,14 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         });
         try {
             await this.callbacks.seek(targetTimestampMs);
-            if ((await Promise.race([seekCompletion, watchdog])) !== 'completed') return;
+            const completion = await Promise.race([seekCompletion, watchdog]);
+            if (completion !== 'completed') {
+                asbTrace('playback/seek', 'Internal seek did not complete', {
+                    completion,
+                    targetTimestampMs,
+                });
+                return;
+            }
             this.warnIfTimestampMismatch(warningCommand, targetTimestampMs);
             const actualTimestampMs = this.timingDriver.currentTimeMs();
             const playbackPositionTimestampMs =
@@ -792,7 +1241,15 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
                     ? actualTimestampMs
                     : targetTimestampMs;
             void this.playbackPositionController.savePlaybackPosition(playbackPositionTimestampMs);
+            if (warningCommand === 'seek') {
+                asbTrace('playback/seek', 'Finished internal seek', {
+                    actualTimestampMs,
+                    playbackPositionTimestampMs,
+                    targetTimestampMs,
+                });
+            }
         } catch (error) {
+            asbTrace('playback/error', 'Internal seek failed', { error, targetTimestampMs, warningCommand });
             this.timingDriver.cancelExpectedInternalSeek();
             throw error;
         } finally {
@@ -804,6 +1261,11 @@ export default class PlaybackEngine<T extends IndexedSubtitleModel> {
         const actualTimestampMs = this.timingDriver.currentTimeMs();
         const frameTimeMs = this.timingDriver.frameTimeMs();
         if (frameTimeMs <= 0 || Math.abs(actualTimestampMs - targetTimestampMs) <= frameTimeMs / 2) return;
+        asbTrace('playback/seek', `${command} timestamp mismatch`, {
+            actualTimestampMs,
+            frameTimeMs,
+            targetTimestampMs,
+        });
         asbWarn('playback/seek', `${command} command has a timestamp mismatch`, {
             targetTimestampMs,
             actualTimestampMs,

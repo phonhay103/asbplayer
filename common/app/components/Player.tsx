@@ -1,10 +1,13 @@
-import type { MutableRefObject } from 'react';
+import { effectiveSettings } from '@project/common/settings/settings-recipes';
 import React, { useEffect, useState, useMemo, useCallback, useRef, useImperativeHandle } from 'react';
+import type { MutableRefObject } from 'react';
+
 import { makeStyles } from '@mui/styles';
 import type { Theme } from '@mui/material';
 import Button from '@mui/material/Button';
 import { useTranslation } from 'react-i18next';
 import { v4 as uuidv4 } from 'uuid';
+import { AutoPausePreference, PlayMode, PostMinePlayback } from '@project/common';
 import type {
     AudioTrackModel,
     CardModel,
@@ -12,20 +15,21 @@ import type {
     IndexedSubtitleModel,
     PlaybackState,
     PostMineAction,
-    RequestSubtitlesResponse,
     SubtitleModel,
     DisplaySubtitleModel,
     TokenizedSubtitleModel,
     VideoTabModel,
 } from '@project/common';
-import { AutoPausePreference, PlayMode, PostMinePlayback } from '@project/common';
-import type { AsbplayerSettings, SettingsProvider } from '@project/common/settings';
+
 import { ApplyStrategy, isTrackAutoCopyable, TokenState, VideoSubtitleSplitBehavior } from '@project/common/settings';
+import type { AsbplayerSettings, SettingsProvider } from '@project/common/settings';
+
 import type { DictionaryProvider } from '@project/common/dictionary-db';
 import { SubtitleCollection } from '@project/common/subtitle-collection';
 import { HoveredToken, SubtitleAnnotations } from '@project/common/annotations';
 import type { SubtitleReader } from '@project/common/subtitle-reader';
 import type { KeyBinder } from '@project/common/key-binder';
+import { asbTrace } from '@project/common/util/log';
 import {
     clampMediaTimestamp,
     download,
@@ -34,14 +38,21 @@ import {
     timeDurationDisplay,
     ensureStoragePersisted,
 } from '@project/common/util';
+import PlaybackEngine, {
+    formatRecipeNotification,
+    formatRecipeSettingLockedNotification,
+} from '@project/common/playback/playback-engine';
+import { playbackModeNotificationJoin } from '@project/common/playback/controllers/playback-mode-controller';
 import BroadcastChannelVideoProtocol from '@project/common/app/services/broadcast-channel-video-protocol';
 import ChromeTabVideoProtocol from '@project/common/app/services/chrome-tab-video-protocol';
 import Clock from '@project/common/playback/timing/clock';
-import type { Point } from '@project/common/app/components/Controls';
 import Controls from '@project/common/app/components/Controls';
+import type { Point } from '@project/common/app/components/Controls';
+
 import Grid from '@mui/material/Grid';
 import MediaAdapter from '@project/common/app/services/media-adapter';
 import SubtitlePlayer, { minSubtitlePlayerWidth } from '@project/common/app/components/SubtitlePlayer';
+import type { SubtitlePlayerHandle } from '@project/common/app/components/SubtitlePlayer';
 import VideoChannel from '@project/common/app/services/video-channel';
 import type ChromeExtension from '@project/common/app/services/chrome-extension';
 import type PlaybackPreferenceController from '@project/common/playback/controllers/playback-preference-controller';
@@ -49,15 +60,15 @@ import { useWindowSize } from '@project/common/app/hooks/use-window-size';
 import { useAppBarHeight } from '@project/common/hooks/use-app-bar-height';
 import { createBlobUrl } from '@project/common/blob-url';
 import type { MiningContext } from '@project/common/app/services/mining-context';
-import type { SeekTimestampCommand, WebSocketClient } from '@project/common/web-socket-client';
+import type { SeekTimestampCommand, WebSocketCommandDispatcher } from '@project/common/web-socket-client';
+import { localMediaId } from '@project/common/web-socket-client/web-socket-media';
 import {
     resolveVideoSubtitleSplitLayout,
     useVideoAspectRatio,
 } from '@project/common/app/components/video-subtitle-split';
 import type { FileWithId } from '@project/common/file-selector';
 import AnimationFrameTimingDriver from '@project/common/playback/timing/animation-frame-timing-driver';
-import PlaybackEngine from '@project/common/playback/playback-engine';
-import { playbackModeNotificationJoin } from '@project/common/playback/controllers/playback-mode-controller';
+
 import {
     buildPlaybackTimelineExportPlan,
     playbackTimelineSettingsSummary,
@@ -67,9 +78,11 @@ import type {
     PlaybackTimelineModeLabels,
     PlaybackTimelineOptionLabels,
 } from '@project/common/playback/timeline/playback-timeline-html';
+
 import { createTheme } from '@project/common/theme/theme';
 import Alert from '@project/common/app/components/Alert';
 import type { AlertNotification } from '@project/common/app/components/Alert';
+
 import useSnackbar from '@project/common/hooks/use-snackbar';
 import {
     claimTokenSelectionFocus,
@@ -86,7 +99,7 @@ interface StylesProps {
 
 const useStyles = makeStyles<Theme, StylesProps>(() => ({
     root: ({ appBarHidden, appBarHeight }) => ({
-        height: appBarHidden ? '100vh' : `calc(100vh - ${appBarHeight}px)`,
+        height: appBarHidden ? '100dvh' : `calc(100dvh - ${appBarHeight}px)`,
         position: 'relative',
         overflowX: 'hidden',
     }),
@@ -141,11 +154,12 @@ interface PlayerProps {
     dictionaryProvider: DictionaryProvider;
     settingsProvider: SettingsProvider;
     settings: AsbplayerSettings;
-    onSettingsChanged?: (settings: Partial<AsbplayerSettings>) => void;
+    onSettingsChanged: (settings: Partial<AsbplayerSettings>) => void;
     profile?: string;
     playbackPreferences: PlaybackPreferenceController;
     keyBinder: KeyBinder;
     extension: ChromeExtension;
+    supportsDictionaryPlayback: boolean;
     videoFrameRef?: MutableRefObject<HTMLIFrameElement | null>;
     videoChannelRef?: MutableRefObject<VideoChannel | null>;
     drawerOpen: boolean;
@@ -178,7 +192,7 @@ interface PlayerProps {
     rewindSubtitle?: SubtitleModel;
     hideControls?: boolean;
     forceCompressedMode?: boolean;
-    webSocketClient?: WebSocketClient;
+    webSocketCommands?: WebSocketCommandDispatcher;
     playbackTimelineFileName?: string;
     playbackTimelineModeLabels: PlaybackTimelineModeLabels;
     playbackTimelineOptionLabels: PlaybackTimelineOptionLabels;
@@ -204,6 +218,7 @@ function PlayerComponent(
         playbackPreferences,
         keyBinder,
         extension,
+        supportsDictionaryPlayback,
         videoFrameRef,
         videoChannelRef,
         drawerOpen,
@@ -235,7 +250,7 @@ function PlayerComponent(
         rewindSubtitle,
         hideControls,
         forceCompressedMode,
-        webSocketClient,
+        webSocketCommands,
         playbackTimelineFileName,
         playbackTimelineModeLabels,
         playbackTimelineOptionLabels,
@@ -243,11 +258,13 @@ function PlayerComponent(
     ref: React.ForwardedRef<PlayerRef>
 ) {
     const { t } = useTranslation();
+    const playbackSettings = useMemo(() => effectiveSettings(settings), [settings]);
     const [playModes, setPlayModes] = useState<Set<PlayMode>>(() => new Set([PlayMode.normal]));
     const playModesRef = useRef<Set<PlayMode>>(playModes);
     playModesRef.current = playModes;
     const [subtitlesSentThroughChannel, setSubtitlesSentThroughChannel] = useState<boolean>();
     const subtitlesRef = useRef<DisplaySubtitleModel[]>(undefined);
+    const annotationSubtitlesRef = useRef<DisplaySubtitleModel[]>(undefined);
     subtitlesRef.current = subtitles;
     const [subtitleCollection, setSubtitleCollection] = useState<
         SubtitleAnnotations | SubtitleCollection<DisplaySubtitleModel>
@@ -284,8 +301,16 @@ function PlayerComponent(
     const hideSubtitlePlayerRef = useRef<boolean>(undefined);
     hideSubtitlePlayerRef.current = hideSubtitlePlayer;
     const [disabledSubtitleTracks, setDisabledSubtitleTracks] = useState<{ [track: number]: boolean }>({});
+    useEffect(() => {
+        asbTrace('playback/player', 'Subtitle list track display state', { disabledSubtitleTracks });
+    }, [disabledSubtitleTracks]);
     const mousePositionRef = useRef<Point>({ x: 0, y: 0 });
     const mediaAdapter = useMemo(() => {
+        asbTrace('playback/player', 'Creating media adapter', {
+            hasChannel: channel !== undefined,
+            hasVideoFileUrl: videoFileUrl !== undefined,
+            hasTab: tab !== undefined,
+        });
         if (videoFileUrl || tab) {
             return new MediaAdapter({ current: channel });
         }
@@ -296,6 +321,7 @@ function PlayerComponent(
     const clockRef = useRef<Clock>(clock);
     clockRef.current = clock;
     const syntheticPlaybackEngineRef = useRef<PlaybackEngine<DisplaySubtitleModel>>(undefined);
+    const subtitlePlayerRef = useRef<SubtitlePlayerHandle>(null);
     const profileRef = useRef(profile);
     const applyOffsetRef = useRef<(offset: number, forwardToVideo: boolean) => void>(undefined);
     const [pendingPlaybackPosition, setPendingPlaybackPosition] = useState<number>();
@@ -311,7 +337,7 @@ function PlayerComponent(
 
     const handleDownloadSubtitleTimeline = useCallback(() => {
         const displaySubtitles = subtitlesRef.current ?? [];
-        const timelineSettingsSummary = playbackTimelineSettingsSummary(settings, playbackTimelineOptionLabels);
+        const timelineSettingsSummary = playbackTimelineSettingsSummary(playbackSettings, playbackTimelineOptionLabels);
         const timelineTracks = [...new Set(displaySubtitles.map((subtitle) => subtitle.track))]
             .sort((left, right) => left - right)
             .map((track) => ({
@@ -325,7 +351,7 @@ function PlayerComponent(
         const playbackPlan = buildPlaybackTimelineExportPlan({
             subtitles: playbackSubtitles,
             durationMs: calculateLengthMs(videoDurationRef, displaySubtitles),
-            settings,
+            settings: playbackSettings,
             playbackRate,
         });
         const title = playbackTimelineFileName ?? 'Subtitle playback timeline';
@@ -334,7 +360,7 @@ function PlayerComponent(
                 [
                     playbackTimelineToHtml({
                         plan: playbackPlan,
-                        themeColor: createTheme(settings.themeType).palette.primary.main,
+                        themeColor: createTheme(playbackSettings.themeType).palette.primary.main,
                         title,
                         modeLabels: playbackTimelineModeLabels,
                         timelineOptionsTitle: timelineSettingsSummary.title,
@@ -347,10 +373,10 @@ function PlayerComponent(
                             condensed: currentPlayModes.has(PlayMode.condensed),
                             autoPauseAtStart:
                                 currentPlayModes.has(PlayMode.autoPause) &&
-                                settings.autoPausePreference !== AutoPausePreference.atEnd,
+                                playbackSettings.autoPausePreference !== AutoPausePreference.atEnd,
                             autoPauseAtEnd:
                                 currentPlayModes.has(PlayMode.autoPause) &&
-                                settings.autoPausePreference !== AutoPausePreference.atStart,
+                                playbackSettings.autoPausePreference !== AutoPausePreference.atStart,
                             repeat: currentPlayModes.has(PlayMode.repeat),
                         },
                         timelineSubtitles: displaySubtitles,
@@ -360,7 +386,13 @@ function PlayerComponent(
             ),
             `${title}.html`
         );
-    }, [playbackRate, playbackTimelineFileName, playbackTimelineModeLabels, playbackTimelineOptionLabels, settings]);
+    }, [
+        playbackRate,
+        playbackTimelineFileName,
+        playbackTimelineModeLabels,
+        playbackTimelineOptionLabels,
+        playbackSettings,
+    ]);
 
     useImperativeHandle(ref, () => ({ downloadSubtitleTimeline: handleDownloadSubtitleTimeline }), [
         handleDownloadSubtitleTimeline,
@@ -440,6 +472,11 @@ function PlayerComponent(
             return;
         }
 
+        asbTrace('playback/player', 'Creating synthetic playback owner', {
+            subtitleCount: subtitlesRef.current?.length ?? 0,
+            hasPlaybackPositionKey: playbackPositionKey !== undefined,
+            appIntegration: extension.supportsAppIntegration,
+        });
         const playbackEngine = new PlaybackEngine({
             settingsProvider,
             appIntegration: extension.supportsAppIntegration,
@@ -489,6 +526,8 @@ function PlayerComponent(
                 },
             }),
             callbacks: {
+                selectToken: (target, options) => subtitlePlayerRef.current?.selectPauseToken(target, options) ?? false,
+                clearAutoPauseTokenSelection: () => subtitlePlayerRef.current?.clearPauseTokenSelection(),
                 pause: () => clock.stop(),
                 play: async () => {
                     clock.start();
@@ -503,38 +542,82 @@ function PlayerComponent(
                 },
                 playbackStateChanged: setPlaybackState,
                 playbackPositionChanged: setPendingPlaybackPosition,
-                saveSettings: (settings) => {
-                    if (onSettingsChanged !== undefined) onSettingsChanged(settings);
-                    else void settingsProvider.set(settings).catch(onError);
+                saveSettings: onSettingsChanged,
+                settingChangeBlocked: (settingLocKey) => {
+                    const notification = formatRecipeSettingLockedNotification(settingLocKey);
+                    setAlert({
+                        open: true,
+                        notifications: [
+                            {
+                                key: notification.key,
+                                message: notification.text(t),
+                                severity: 'info',
+                            },
+                        ],
+                    });
+                },
+                recipeChanged: (name, transition) => {
+                    synchronizePlaybackModes(transition.modes);
+                    if (!subtitlesRef.current?.length) return;
+                    const notification = formatRecipeNotification(name);
+                    setAlert({
+                        open: true,
+                        notifications: [
+                            {
+                                key: notification.key,
+                                message: notification.text(t),
+                                severity: 'info',
+                            },
+                        ],
+                    });
                 },
                 playbackModesChanged: ({ modes }) => synchronizePlaybackModes(modes),
                 initialPlaybackSettingsChanged: (settings) => {
+                    asbTrace('playback/player', 'Applying initial synthetic playback settings', {
+                        subtitleOffset: settings.subtitleOffset,
+                        playbackRate: settings.playbackRate,
+                        playbackModes: [...settings.playbackModeTransition.modes],
+                    });
                     const notifications = settings.notifications.offsetAndRate.map((notification) =>
                         notification.type === 'message'
                             ? notification.message
                             : t(notification.notification.locKey, notification.notification.replacements)
                     );
                     synchronizePlaybackModes(settings.playbackModeTransition.modes);
-                    if (!notifications.length) return;
-                    setAlert({
-                        open: true,
-                        notifications: [
-                            {
-                                message: notifications.join(playbackModeNotificationJoin),
-                                severity: 'info',
-                                autoHideDuration: settings.autoHideDuration,
-                            },
-                        ],
-                    });
+                    const alerts: AlertNotification[] = [];
+                    if (notifications.length) {
+                        alerts.push({
+                            message: notifications.join(playbackModeNotificationJoin),
+                            severity: 'info',
+                            autoHideDuration: settings.autoHideDuration,
+                        });
+                    }
+                    if (settings.recipeName !== null) {
+                        const notification = formatRecipeNotification(settings.recipeName);
+                        alerts.push({
+                            key: notification.key,
+                            message: notification.text(t),
+                            severity: 'info',
+                            autoHideDuration: settings.autoHideDuration,
+                        });
+                    }
+                    if (alerts.length) setAlert({ open: true, notifications: alerts });
                 },
-                onError,
+                onError: (error) => {
+                    asbTrace('playback/player', 'Synthetic playback owner reported an error', { error });
+                    onError(error);
+                },
             },
         });
         syntheticPlaybackEngineRef.current = playbackEngine;
+        asbTrace('playback/player', 'Binding synthetic playback owner');
         playbackEngine.bind();
+        const clearPauseTokenSelection = subtitlePlayerRef.current?.clearPauseTokenSelection;
 
         return () => {
+            asbTrace('playback/player', 'Unbinding synthetic playback owner');
             playbackEngine.unbind();
+            clearPauseTokenSelection?.();
             if (syntheticPlaybackEngineRef.current === playbackEngine) {
                 syntheticPlaybackEngineRef.current = undefined;
             }
@@ -557,6 +640,9 @@ function PlayerComponent(
         if (profileRef.current === profile) return;
         profileRef.current = profile;
         syntheticPlaybackEngineRef.current?.profileChanged(profile);
+        if (subtitleCollectionRef.current instanceof SubtitleAnnotations) {
+            subtitleCollectionRef.current.profileChanged();
+        }
     }, [profile]);
 
     useEffect(() => {
@@ -566,7 +652,9 @@ function PlayerComponent(
 
     useEffect(() => {
         if (!syntheticPlayback) return;
-        syntheticPlaybackEngineRef.current?.subtitlesChanged(subtitles);
+        syntheticPlaybackEngineRef.current?.subtitlesChanged(subtitles, {
+            timingChanged: subtitles !== annotationSubtitlesRef.current,
+        });
     }, [subtitles, syntheticPlayback]);
 
     useEffect(() => {
@@ -622,6 +710,12 @@ function PlayerComponent(
         let channel: VideoChannel;
         setPlaybackState(undefined);
 
+        asbTrace('playback/player', 'Creating media channel', {
+            source: videoFile ? 'file' : 'tab',
+            hasVideoFile: videoFile !== undefined,
+            hasTab: tab !== undefined,
+        });
+
         if (videoFile) {
             const channelId = uuidv4();
             channel = new VideoChannel(new BroadcastChannelVideoProtocol(channelId));
@@ -639,6 +733,7 @@ function PlayerComponent(
         setChannel(channel);
 
         return () => {
+            asbTrace('playback/player', 'Closing media channel');
             setPlaybackState(undefined);
             clock.setTime(0, { paused: true });
             channel.close();
@@ -668,6 +763,10 @@ function PlayerComponent(
 
     useEffect(() => {
         async function init() {
+            asbTrace('playback/player', 'Loading player subtitles', {
+                subtitleFileCount: subtitleFiles?.length ?? 0,
+                flattenSubtitleFiles,
+            });
             const offset = syntheticPlaybackEngineRef.current?.lastSubtitleOffset ?? 0;
             let subtitles: DisplaySubtitleModel[] | undefined;
 
@@ -696,8 +795,13 @@ function PlayerComponent(
                     }));
 
                     setSubtitlesSentThroughChannel(false);
+                    asbTrace('playback/player', 'Loaded player subtitles', {
+                        subtitleCount: subtitles.length,
+                        offset,
+                    });
                     onSubtitles(subtitles);
                 } catch (e) {
+                    asbTrace('playback/player', 'Failed to load player subtitles', { error: e });
                     onError(e);
                     onSubtitles([]);
                 } finally {
@@ -708,7 +812,9 @@ function PlayerComponent(
             }
         }
 
-        void init().then(() => onLoaded(subtitleFiles?.map((f) => f.file) ?? []));
+        void init()
+            .then(() => onLoaded(subtitleFiles?.map((f) => f.file) ?? []))
+            .catch(onError);
     }, [subtitleReader, onLoaded, onError, subtitleFiles, flattenSubtitleFiles, onSubtitles]);
 
     useEffect(() => {
@@ -739,6 +845,7 @@ function PlayerComponent(
                             tokenization: s.tokenization,
                         };
                     }
+                    annotationSubtitlesRef.current = allSubtitles;
                     return allSubtitles;
                 });
             },
@@ -746,10 +853,15 @@ function PlayerComponent(
         );
         if (subtitlesRef.current) subtitleAnnotations.setSubtitles(subtitlesRef.current);
         subtitleAnnotations.bind();
+        asbTrace('playback/player', 'Bound subtitle annotation collection', {
+            subtitleCount: subtitlesRef.current?.length ?? 0,
+            hasMediaId: mediaId !== undefined,
+        });
         setSubtitleCollection(subtitleAnnotations);
         subtitleCollectionRef.current = subtitleAnnotations;
         return () => {
             if (!(subtitleCollectionRef.current instanceof SubtitleAnnotations)) return;
+            asbTrace('playback/player', 'Unbinding subtitle annotation collection');
             subtitleCollectionRef.current.unbind();
         };
     }, [channel, dictionaryProvider, settingsProvider, mediaId, tab, onSubtitles]);
@@ -761,7 +873,7 @@ function PlayerComponent(
 
     useEffect(() => {
         if (!(subtitleCollectionRef.current instanceof SubtitleAnnotations)) return;
-        subtitleCollectionRef.current.settingsUpdated(settings);
+        subtitleCollectionRef.current.settingsUpdated(settings, { force: false });
     }, [settings]);
 
     useEffect(() => {
@@ -784,6 +896,7 @@ function PlayerComponent(
                         };
                     }
                 }
+                annotationSubtitlesRef.current = allSubtitles;
                 return allSubtitles;
             });
         });
@@ -791,38 +904,6 @@ function PlayerComponent(
 
     useEffect(() => {
         if (!tab) return; // Only matters for extension
-
-        // If the user is on the app's tab in the same window where the chrome side panel is now displaying
-        // the mining history, the subtitle side panel on the video will not receive the updated subtitles.
-        // Once the subtitle side panel is active, we only need to refresh the colors once to get anything missed.
-        void (async () => {
-            if (!subtitlesRef.current) return;
-            const response = (await extension.requestSubtitles(tab.id, tab.src)) as
-                | RequestSubtitlesResponse
-                | undefined;
-            if (!response) return;
-            const { subtitles: updatedSubtitles } = response;
-            const playerSubtitles = subtitlesForPlayer(updatedSubtitles);
-            onSubtitles((prevSubtitles) => {
-                if (!prevSubtitles?.length) return prevSubtitles;
-                const allSubtitles = prevSubtitles.slice();
-                for (const s of playerSubtitles) {
-                    // FIXME: Primitive check to ensure we don't apply a color update from a completely different subtitle or subtitle file.
-                    // We should probably have a hash or ID associated with the subtitle file this color update is for.
-                    const updatedText = (s as TokenizedSubtitleModel).originalText ?? s.text;
-                    const prevText =
-                        (allSubtitles[s.index] as TokenizedSubtitleModel).originalText ?? allSubtitles[s.index].text;
-                    if (updatedText === prevText) {
-                        allSubtitles[s.index] = {
-                            ...allSubtitles[s.index],
-                            text: s.text,
-                            tokenization: s.tokenization,
-                        };
-                    }
-                }
-                return allSubtitles;
-            });
-        })();
 
         const removeCardUpdatedDialog = channel?.onCardUpdatedDialog(() =>
             extension.cardUpdatedDialog(tab.id, tab.src)
@@ -916,6 +997,11 @@ function PlayerComponent(
     useEffect(
         () =>
             channel?.onReady(() => {
+                asbTrace('playback/player', 'Media channel reported ready', {
+                    durationMs: channel.duration * 1000,
+                    subtitleCount: subtitles.length,
+                    hasVideoFileName: videoFile?.file?.name !== undefined,
+                });
                 videoDurationRef.current = channel.duration;
                 return channel?.ready(calculateLengthMs(videoDurationRef, subtitles), videoFile?.file?.name);
             }),
@@ -934,13 +1020,24 @@ function PlayerComponent(
 
         return channel.onReady(() => {
             setSubtitlesSentThroughChannel(true);
+            asbTrace('playback/player', 'Sending subtitles to media channel', {
+                subtitleCount: subtitles.length,
+                fileCount: flattenSubtitleFiles ? 1 : subtitleFiles.length,
+            });
             channel.subtitles(
                 subtitles,
                 flattenSubtitleFiles ? [subtitleFiles[0].file.name] : subtitleFiles.map((f) => f.file.name)
             );
         });
     }, [subtitles, channel, flattenSubtitleFiles, subtitleFiles, subtitlesSentThroughChannel]);
-    useEffect(() => channel?.onReady(() => channel?.subtitleSettings(settings)), [channel, settings]);
+    useEffect(
+        () =>
+            channel?.onReady(() => {
+                asbTrace('playback/player', 'Sending subtitle settings to media channel');
+                channel?.subtitleSettings(settings);
+            }),
+        [channel, settings]
+    );
     useEffect(
         () => channel?.onReady(() => channel?.hideSubtitlePlayerToggle(hideSubtitlePlayer)),
         [channel, hideSubtitlePlayer]
@@ -963,6 +1060,11 @@ function PlayerComponent(
     useEffect(
         () =>
             channel?.onReady((paused) => {
+                asbTrace('playback/player', 'Media channel initial playback state', {
+                    paused,
+                    currentTimeMs: channel.currentTime * 1000,
+                    playbackRate: channel.playbackRate,
+                });
                 if (channel) {
                     clock.setTime(channel.currentTime * 1000, { paused });
                 }
@@ -1247,12 +1349,14 @@ function PlayerComponent(
     const handlePlaybackRateChange = useCallback(
         (playbackRate: number) => {
             if (syntheticPlaybackEngineRef.current) {
-                notifyPlaybackRate(syntheticPlaybackEngineRef.current.playbackRateChanged(playbackRate));
+                notifyPlaybackRate(
+                    syntheticPlaybackEngineRef.current.playbackRateChanged(playbackRate, { notifyBlocked: true })
+                );
                 return;
             }
-            updatePlaybackRate(playbackRate, true);
+            mediaAdapter.playbackRate(playbackRate);
         },
-        [notifyPlaybackRate, updatePlaybackRate]
+        [notifyPlaybackRate, mediaAdapter]
     );
 
     const handlePlayMode = useCallback(
@@ -1468,15 +1572,19 @@ function PlayerComponent(
         };
     }, [clock, dictionaryProvider, handleCopyFromSubtitlePlayer, seek, settings]);
 
-    useEffect(() => {
-        if (!webSocketClient) {
-            return;
-        }
+    useEffect(
+        () =>
+            webSocketCommands?.setHandlers({
+                onSeekTimestamp: async ({ body: { timestamp, mediaId } }: SeekTimestampCommand) => {
+                    if (mediaId !== undefined && mediaId !== localMediaId(extension.id)) {
+                        return;
+                    }
 
-        webSocketClient.onSeekTimestamp = async ({ body: { timestamp } }: SeekTimestampCommand) => {
-            void seek(timestamp * 1000, clock, true, { paused: !clock.running });
-        };
-    }, [webSocketClient, extension, seek, clock]);
+                    void seek(timestamp * 1000, clock, true, { paused: !clock.running });
+                },
+            }),
+        [webSocketCommands, extension, seek, clock]
+    );
 
     const [windowWidth, windowHeight] = useWindowSize(true);
 
@@ -1484,7 +1592,7 @@ function PlayerComponent(
     const shouldLoadVideoAspectRatio =
         videoInWindow && settings.videoSubtitleSplitBehavior !== VideoSubtitleSplitBehavior.rememberSplitPosition;
     const videoAspectRatio = useVideoAspectRatio(videoFileUrl, shouldLoadVideoAspectRatio);
-    const loaded = videoFileUrl || subtitles;
+    const loaded = videoFileUrl || (sources?.subtitleFiles.length ?? 0) > 0 || tab;
     const playerHeight = appBarHidden ? windowHeight : Math.max(0, windowHeight - appBarHeight);
     const aspectFitVideoWidth = videoAspectRatio
         ? Math.max(minVideoPlayerWidth, Math.round(playerHeight * videoAspectRatio))
@@ -1590,6 +1698,9 @@ function PlayerComponent(
                             onAudioTrackSelected={handleAudioTrackSelected}
                             onTabSelected={onTabSelected}
                             onOffsetChange={handleOffsetChange}
+                            recipes={supportsDictionaryPlayback && !syntheticPlayback ? settings.recipes : undefined}
+                            activeRecipeId={settings.activeRecipeId}
+                            onRecipeSelect={(activeRecipeId) => onSettingsChanged({ activeRecipeId })}
                             onPlayMode={handlePlayMode}
                             onLoadSubtitles={onLoadSubtitles}
                             disableKeyEvents={disableKeyEvents}
@@ -1599,6 +1710,8 @@ function PlayerComponent(
                         />
                     )}
                     <SubtitlePlayer
+                        onSettingsChanged={onSettingsChanged}
+                        ref={subtitlePlayerRef}
                         subtitles={subtitles}
                         subtitleCollection={subtitleCollection}
                         playbackState={playbackState}
@@ -1632,7 +1745,7 @@ function PlayerComponent(
                         maxResizeWidth={subtitlePlayerMaxResizeWidth}
                         settings={settings}
                         keyBinder={keyBinder}
-                        webSocketClient={webSocketClient}
+                        webSocketCommands={webSocketCommands}
                         initialWidth={subtitlePlayerInitialWidth}
                     />
                 </Grid>

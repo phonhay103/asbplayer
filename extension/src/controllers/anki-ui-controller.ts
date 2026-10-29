@@ -1,4 +1,6 @@
-import { asbError, sourceString } from '@project/common/util';
+import project from '@project/common/project';
+import { asbError } from '@project/common/util/log';
+import { sourceString } from '@project/common/util';
 import type {
     ActiveProfileMessage,
     AnkiDialogSettings,
@@ -35,18 +37,18 @@ import { frameColorSchemeStyleBlock } from '@/services/frame-color-scheme';
 // Otherwise, Chrome won't insert content scripts into the iframe (e.g. Yomichan won't work).
 async function html(language: string) {
     return `<!DOCTYPE html>
-                <html lang="en">
+                <html lang="${encodeURIComponent(language)}">
                 <head>
                     <meta charset="utf-8" />
                     <meta name="viewport" content="width=device-width, initial-scale=1" />
-                    <title>asbplayer - Anki</title>
+                    <title>${project.names.short} - Anki</title>
                     <style>
                         @import url(${browser.runtime.getURL('/fonts/fonts.css')});
                         ${frameColorSchemeStyleBlock()}
                     </style>
                 </head>
                 <body>
-                    <div id="root" style="width:100%;height:100vh;"></div>
+                    <div id="root" style="width:100%;height:100dvh;"></div>
                     <script type="application/json" id="loc">${JSON.stringify(
                         await fetchLocalization(language)
                     )}</script>
@@ -79,17 +81,20 @@ export default class AnkiUiController {
         this._settings = settings;
 
         if (this.frame?.bound) {
-            void this.frame.client().then(async (client) => {
-                const profilesPromise = settingsProvider.profiles();
-                const activeProfilePromise = settingsProvider.activeProfile();
-                const message: AnkiDialogSettingsMessage = {
-                    command: 'settings',
-                    settings,
-                    profiles: await profilesPromise,
-                    activeProfile: (await activeProfilePromise)?.name,
-                };
-                client.sendMessage(message);
-            });
+            void this.frame
+                .client()
+                .then(async (client) => {
+                    const profilesPromise = settingsProvider.profiles();
+                    const activeProfilePromise = settingsProvider.activeProfile();
+                    const message: AnkiDialogSettingsMessage = {
+                        command: 'settings',
+                        settings,
+                        profiles: await profilesPromise,
+                        activeProfile: (await activeProfilePromise)?.name,
+                    };
+                    client.sendMessage(message);
+                })
+                .catch((error) => asbError('anki/ui', 'Failed to update Anki dialog settings:', error));
         }
     }
 
@@ -303,16 +308,19 @@ export default class AnkiUiController {
                         }
                         case 'activeProfile': {
                             const activeProfileMessage = message as ActiveProfileMessage;
-                            void context.settings.setActiveProfile(activeProfileMessage.profile).then(() => {
-                                const settingsUpdatedCommand: VideoToExtensionCommand<SettingsUpdatedMessage> = {
-                                    sender: 'asbplayer-video',
-                                    message: {
-                                        command: 'settings-updated',
-                                    },
-                                    src: context.registeredVideoSrc,
-                                };
-                                void browser.runtime.sendMessage(settingsUpdatedCommand);
-                            });
+                            void context.settings
+                                .setActiveProfile(activeProfileMessage.profile)
+                                .then(async () => {
+                                    const settingsUpdatedCommand: VideoToExtensionCommand<SettingsUpdatedMessage> = {
+                                        sender: 'asbplayer-video',
+                                        message: {
+                                            command: 'settings-updated',
+                                        },
+                                        src: context.registeredVideoSrc,
+                                    };
+                                    await browser.runtime.sendMessage(settingsUpdatedCommand);
+                                })
+                                .catch((error) => asbError('anki/ui', 'Failed to set the active profile:', error));
                             return;
                         }
                         case 'dismissedQuickSelectFtue':
@@ -322,16 +330,19 @@ export default class AnkiUiController {
                             return;
                         case 'exported': {
                             const exportedMessage = message as AnkiUiBridgeExportedMessage;
-                            void context.settings.set({ lastSelectedAnkiExportMode: exportedMessage.mode }).then(() => {
-                                const settingsUpdatedCommand: VideoToExtensionCommand<SettingsUpdatedMessage> = {
-                                    sender: 'asbplayer-video',
-                                    message: {
-                                        command: 'settings-updated',
-                                    },
-                                    src: context.registeredVideoSrc,
-                                };
-                                void browser.runtime.sendMessage(settingsUpdatedCommand);
-                            });
+                            void context.settings
+                                .set({ lastSelectedAnkiExportMode: exportedMessage.mode })
+                                .then(async () => {
+                                    const settingsUpdatedCommand: VideoToExtensionCommand<SettingsUpdatedMessage> = {
+                                        sender: 'asbplayer-video',
+                                        message: {
+                                            command: 'settings-updated',
+                                        },
+                                        src: context.registeredVideoSrc,
+                                    };
+                                    await browser.runtime.sendMessage(settingsUpdatedCommand);
+                                })
+                                .catch((error) => asbError('anki/ui', 'Failed to save Anki export settings:', error));
                             return;
                         }
                         case 'card-updated-dialog': {

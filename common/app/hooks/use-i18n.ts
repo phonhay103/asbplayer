@@ -1,4 +1,5 @@
-import { asbError } from '@project/common/util';
+import project from '@project/common/project';
+import { asbError } from '@project/common/util/log';
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import resourcesToBackend from 'i18next-resources-to-backend';
@@ -10,7 +11,7 @@ let init: Promise<any> = i18n
     .init({
         partialBundledLanguages: true,
         resources: {},
-        fallbackLng: 'en',
+        fallbackLng: project.defaultLanguage,
         debug: import.meta.env.MODE === 'development',
         ns: 'translation',
         defaultNS: 'translation',
@@ -27,7 +28,11 @@ export const useI18n = ({ language }: { language: string }) => {
             return;
         }
 
-        void init.then(() => setInitialized(true));
+        void init.then(
+            () => setInitialized(true),
+            // The language-change chain below logs initialization failures.
+            () => undefined
+        );
     }, [initialized]);
 
     useEffect(() => {

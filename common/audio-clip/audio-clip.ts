@@ -1,4 +1,5 @@
-import { asbError, download } from '@project/common/util';
+import { asbError } from '@project/common/util/log';
+import { download } from '@project/common/util';
 import Mp3Encoder from '@project/common/audio-clip/mp3-encoder';
 
 import type { CardModel, FileModel } from '@project/common';
@@ -909,6 +910,8 @@ export default class AudioClip {
                 return 'audioCaptureFailed.message';
             case AudioErrorCode.fileLinkLost:
                 return 'ankiDialog.audioFileLinkLost';
+            case AudioErrorCode.captureFailed:
+                return 'ankiDialog.audioCaptureFailed';
         }
     }
 }

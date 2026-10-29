@@ -1,4 +1,6 @@
-import { asbError, download, timeDurationDisplay } from '@project/common/util';
+import project from '@project/common/project';
+import { asbError } from '@project/common/util/log';
+import { download, timeDurationDisplay } from '@project/common/util';
 import { MediaFragment } from '@project/common';
 import type {
     AsbplayerInstance,
@@ -22,6 +24,7 @@ import type {
     DownloadAudioMessage,
     CardExportedMessage,
     DisplaySubtitleModel,
+    TokenizedSubtitleModel,
 } from '@project/common';
 import type { BulkExportStartedPayload } from '@project/extension/src/controllers/bulk-export-controller';
 import type { AsbplayerSettings, SettingsProvider } from '@project/common/settings';
@@ -64,6 +67,7 @@ interface Props {
     dictionaryProvider: DictionaryProvider;
     settingsProvider: SettingsProvider;
     settings: AsbplayerSettings;
+    onSettingsChanged: (settings: Partial<AsbplayerSettings>) => void;
     extension: ChromeExtension;
 }
 
@@ -99,7 +103,13 @@ const sameAsbplayerInstance = (a: AsbplayerInstance, b: AsbplayerInstance) => {
 const emptyArray: VideoTabModel[] = [];
 const miningContext = new MiningContext();
 
-export default function SidePanel({ dictionaryProvider, settingsProvider, settings, extension }: Props) {
+export default function SidePanel({
+    dictionaryProvider,
+    settingsProvider,
+    settings,
+    onSettingsChanged,
+    extension,
+}: Props) {
     const { t } = useTranslation();
     const playbackPreferences = useMemo(() => new PlaybackPreferenceController(), []);
     const subtitleReader = useMemo(
@@ -446,7 +456,9 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
     }, [refreshCopyHistory]);
     const handleCloseCopyHistory = useCallback(() => {
         setShowCopyHistory(false);
-        void clearExtensionRequestedLocation();
+        void clearExtensionRequestedLocation().catch((error) =>
+            asbError('side-panel', 'Failed to clear the requested panel location:', error)
+        );
     }, []);
     const handleClipAudio = useCallback(
         async (item: CopyHistoryItem) => {
@@ -497,7 +509,8 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
                     settings.mediaFragmentFormat,
                     settings.mediaFragmentTrimStart,
                     settings.mediaFragmentTrimEnd,
-                    settings.mediaFragmentMaxClipLength
+                    settings.mediaFragmentMaxClipLength,
+                    settings.trimBlackBars
                 );
 
                 if (image) {
@@ -579,7 +592,7 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
     );
 
     const handleOpenUserGuide = useCallback(() => {
-        void browser.tabs.create({ active: true, url: 'https://docs.asbplayer.dev/docs/intro' });
+        void browser.tabs.create({ active: true, url: `${project.urls.docs}/docs/intro` });
     }, []);
     const noOp = useCallback(() => {}, []);
 
@@ -589,7 +602,9 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
     const handleShowStatistics = useCallback(() => setStatisticsOpen(true), []);
     const handleCloseStatistics = useCallback(() => {
         setStatisticsOpen(false);
-        void clearExtensionRequestedLocation();
+        void clearExtensionRequestedLocation().catch((error) =>
+            asbError('side-panel', 'Failed to clear the requested panel location:', error)
+        );
     }, []);
     const handleOpenStatisticsOverlay = useCallback(
         (mediaId: string) => {
@@ -614,6 +629,51 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
             active: true,
         });
     }, []);
+
+    useEffect(() => {
+        if (syncedVideoTab === undefined || currentTabId !== syncedVideoTab.id) {
+            return;
+        }
+
+        // If the user is on the app's tab in the same window where the chrome side panel is now displaying
+        // the mining history, the subtitle side panel on the video will not receive the updated subtitles.
+        // Once the subtitle side panel is active, we only need to refresh the colors once to get anything missed.
+        void (async () => {
+            const message: ExtensionToVideoCommand<RequestSubtitlesMessage> = {
+                sender: 'asbplayer-extension-to-video',
+                message: {
+                    command: 'request-subtitles',
+                },
+                src: syncedVideoTab.src,
+            };
+            const response: RequestSubtitlesResponse | undefined = await browser.tabs.sendMessage(
+                syncedVideoTab.id,
+                message
+            );
+
+            if (!response) return;
+            const { subtitles: updatedSubtitles } = response;
+            setSubtitles((prevSubtitles) => {
+                if (!prevSubtitles?.length) return prevSubtitles;
+                const allSubtitles = prevSubtitles.slice();
+                for (const s of updatedSubtitles) {
+                    // FIXME: Primitive check to ensure we don't apply a color update from a completely different subtitle or subtitle file.
+                    // We should probably have a hash or ID associated with the subtitle file this color update is for.
+                    const updatedText = (s as TokenizedSubtitleModel).originalText ?? s.text;
+                    const prevText =
+                        (allSubtitles[s.index] as TokenizedSubtitleModel)?.originalText ?? allSubtitles[s.index]?.text;
+                    if (updatedText === prevText) {
+                        allSubtitles[s.index] = {
+                            ...allSubtitles[s.index],
+                            text: s.text,
+                            tokenization: s.tokenization,
+                        };
+                    }
+                }
+                return allSubtitles;
+            });
+        })().catch((error) => asbError('side-panel', error));
+    }, [currentTabId, syncedVideoTab]);
 
     if (!i18nInitialized) {
         return null;
@@ -689,6 +749,7 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
                         <>
                             <SidePanelRecordingOverlay show={recordingAudio} />
                             <Player
+                                supportsDictionaryPlayback
                                 ref={playerRef}
                                 origin={browser.runtime.getURL('/sidepanel.html')}
                                 subtitles={subtitles}
@@ -699,6 +760,7 @@ export default function SidePanel({ dictionaryProvider, settingsProvider, settin
                                 dictionaryProvider={dictionaryProvider}
                                 settingsProvider={settingsProvider}
                                 settings={settings}
+                                onSettingsChanged={onSettingsChanged}
                                 playbackPreferences={playbackPreferences}
                                 onCopy={handleMineFromSubtitlePlayer}
                                 onError={handleError}

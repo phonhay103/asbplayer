@@ -1,13 +1,5 @@
 import { PlayMode } from '@project/common';
-
-export const minimumPlaybackRate = 0.01;
-
-export const roundPlaybackRate = (playbackRate: number): number => Math.round(playbackRate * 1000) / 1000;
-
-export const normalizePlaybackRate = (playbackRate: number): number | undefined => {
-    if (!Number.isFinite(playbackRate)) return;
-    return Math.max(minimumPlaybackRate, roundPlaybackRate(playbackRate));
-};
+import { asbTrace } from '@project/common/util/log';
 
 export interface PlayModeTransition {
     readonly modes: Set<PlayMode>;
@@ -155,15 +147,26 @@ export default class PlaybackModeController {
         const oldModes = this.playModes;
         this.modes = this.normalizeModes(modes);
         const newModes = this.playModes;
-        return {
+        const transition = {
             modes: newModes,
             ...modeChanges(oldModes, newModes),
         };
+        asbTrace('playback/mode', 'Set playback modes', {
+            added: [...transition.added],
+            modes: [...transition.modes],
+            requestedModes: [...modes],
+            removed: [...transition.removed],
+        });
+        return transition;
     }
 
     transition(targetMode: PlayMode): PlayModeTransition {
         const oldModes = this.playModes;
         if (this.playbackModesDisabled) {
+            asbTrace('playback/mode', 'Ignored playback mode transition because modes are disabled', {
+                targetMode,
+                modes: [...oldModes],
+            });
             return {
                 modes: oldModes,
                 added: new Set(),
@@ -182,10 +185,17 @@ export default class PlaybackModeController {
         }
 
         const modes = this.playModes;
-        return {
+        const transition = {
             modes,
             ...modeChanges(oldModes, modes),
         };
+        asbTrace('playback/mode', 'Transitioned playback mode', {
+            added: [...transition.added],
+            modes: [...transition.modes],
+            removed: [...transition.removed],
+            targetMode,
+        });
+        return transition;
     }
 
     private normalizeModes(modes: ReadonlySet<PlayMode>): Set<PlayMode> {

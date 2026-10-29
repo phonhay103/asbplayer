@@ -2,33 +2,35 @@
 sidebar_position: 1
 ---
 
-# Loading subtitles
+import project from '@site/src/project';
+
+# Loading subtitles {#loading-subtitles}
 
 The first step to using asbplayer is to load subtitles onto a video source.
 
-## Streaming video
+## Streaming video {#streaming-video}
 
-### Chrome (or other Chromium-based browsers)
+### Chrome (or other Chromium-based browsers) {#chromium}
 
-1. Install the Chrome extension from Google's [web store](https://chromewebstore.google.com/detail/asbplayer-language-learni/hkledmpjpaehamkiehglnbelcpdflcab) or from the [GitHub release](https://github.com/asbplayer/asbplayer/releases/latest).
+1. Install the Chrome extension from Google's <a href={project.extension.chrome.storeUrl}>web store</a> or from the <a href={`${project.urls.repo}/releases/latest`}>GitHub release</a>.
 2. Click 🧩 icon in browser toolbar → asbplayer → **Open Side Panel**
 3. Click **Load Subtitles** to load subtitles onto any video on the current page.
 
-### Firefox
+### Firefox {#firefox}
 
 :::warning
 asbplayer is missing some features on Firefox. See the [Compatibility](../compatibility#extension) section.  
 :::
 
-1. Install the the Firefox addon from the Mozilla [addon store](https://addons.mozilla.org/en-US/firefox/addon/asbplayer-language-learning/) or from the [GitHub release](https://github.com/asbplayer/asbplayer/releases/latest).
+1. Install the the Firefox addon from the Mozilla <a href={project.extension.firefox.storeUrl}>addon store</a> or from the <a href={`${project.urls.repo}/releases/latest`}>GitHub release</a>.
 2. Click 🧩 icon in browser toolbar → asbplayer → **Open Side Panel**
 3. Click **Load Subtitles** to load subtitles onto any video on the current page.
 
-### Android
+### Android {#android}
 
 See the [Android guide](../guides/android).
 
-## Video files
+## Video files {#video-files}
 
-1. Open the [website](https://app.asbplayer.dev/).
+1. Open the <a href={project.urls.app}>website</a>.
 2. Drag-and-drop video and subtitle files into the website.

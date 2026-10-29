@@ -1,4 +1,4 @@
-import type { IndexedSubtitleModel, Token } from '@project/common';
+import type { Fetcher, IndexedSubtitleModel, Token } from '@project/common';
 import { jest } from '@jest/globals';
 import { DictionaryProvider } from '@project/common/dictionary-db';
 import {
@@ -19,19 +19,21 @@ export const cloneAnnotationConfig = (track: DictionaryTrack) => ({
         color: { ...track.dictionaryTokenAnnotationConfig.video.color },
         reading: { ...track.dictionaryTokenAnnotationConfig.video.reading },
         frequency: { ...track.dictionaryTokenAnnotationConfig.video.frequency },
+        gloss: { ...track.dictionaryTokenAnnotationConfig.video.gloss },
         pitchAccent: { ...track.dictionaryTokenAnnotationConfig.video.pitchAccent },
     },
     subtitlePlayer: {
         color: { ...track.dictionaryTokenAnnotationConfig.subtitlePlayer.color },
         reading: { ...track.dictionaryTokenAnnotationConfig.subtitlePlayer.reading },
         frequency: { ...track.dictionaryTokenAnnotationConfig.subtitlePlayer.frequency },
+        gloss: { ...track.dictionaryTokenAnnotationConfig.subtitlePlayer.gloss },
         pitchAccent: { ...track.dictionaryTokenAnnotationConfig.subtitlePlayer.pitchAccent },
     },
     onStatuses: track.dictionaryTokenAnnotationConfig.onStatuses.map((config) => ({ ...config })),
     onStates: track.dictionaryTokenAnnotationConfig.onStates.map((config) => ({ ...config })),
 });
 
-export const makeDictionaryTrack = (overrides: Partial<DictionaryTrack> = {}): DictionaryTrack => {
+export const makeDictionaryTrack = (overrides?: Partial<DictionaryTrack>): DictionaryTrack => {
     const track = {
         ...defaultSettings.dictionaryTracks[0],
         dictionaryAnkiDecks: [...defaultSettings.dictionaryTracks[0].dictionaryAnkiDecks],
@@ -42,6 +44,27 @@ export const makeDictionaryTrack = (overrides: Partial<DictionaryTrack> = {}): D
             ...config,
         })),
         ...overrides,
+    };
+    const playback = track.dictionaryPlaybackConfig;
+    const clonePlaybackFeature = <T extends typeof playback.autoPause>(feature: T): T => ({
+        ...feature,
+        rules: { ...feature.rules },
+        onStatuses: feature.onStatuses.map((config) => ({ ...config })),
+        onStates: feature.onStates.map((config) => ({ ...config })),
+    });
+    const dictionaryPlaybackConfig = {
+        selectOnPause: {
+            onStatuses: playback.selectOnPause.onStatuses.map((trigger) => ({ ...trigger })),
+            onStates: playback.selectOnPause.onStates.map((trigger) => ({ ...trigger })),
+        },
+        autoPause: clonePlaybackFeature(playback.autoPause),
+        condensed: clonePlaybackFeature(playback.condensed),
+        fastForward: {
+            ...clonePlaybackFeature(playback.fastForward),
+            rateByComprehension: { ...playback.fastForward.rateByComprehension },
+        },
+        repeat: clonePlaybackFeature(playback.repeat),
+        wordVisibility: clonePlaybackFeature(playback.wordVisibility),
     };
     const dictionaryTokenAnnotationConfig = cloneAnnotationConfig(track);
     dictionaryTokenAnnotationConfig.colorizeEnabled = track.dictionaryColorizeSubtitles;
@@ -68,7 +91,7 @@ export const makeDictionaryTrack = (overrides: Partial<DictionaryTrack> = {}): D
         track.dictionaryDisplayIgnoredTokenReadings &&
         track.dictionaryTokenReadingAnnotation !== TokenReadingAnnotation.NEVER;
 
-    return { ...track, dictionaryTokenAnnotationConfig };
+    return { ...track, dictionaryPlaybackConfig, dictionaryTokenAnnotationConfig };
 };
 
 export const makeDictionaryTracks = (track = makeDictionaryTrack()) =>
@@ -130,19 +153,21 @@ export const makeStorage = () => ({
     _removeCallback: jest.fn(),
 });
 
-export const makeSubtitleAnnotations = (settings = makeSettings()) => {
+export const makeSubtitleAnnotations = (settings = makeSettings(), fetcher?: Fetcher) => {
     const storage = makeStorage();
     const provider = new DictionaryProvider(storage as any);
     const settingsStorage = new MockSettingsStorage();
     settingsStorage.setData(settings);
     const settingsProvider = new SettingsProvider(settingsStorage);
-    const subtitleAnnotationsUpdated = jest.fn();
+    const subtitleAnnotationsUpdated = jest.fn<ConstructorParameters<typeof SubtitleAnnotations>[4]>();
     const subtitleAnnotations = new SubtitleAnnotations(
         provider,
         settingsProvider,
         { showingCheckRadiusMs: 150 },
         'media-id',
-        subtitleAnnotationsUpdated
+        subtitleAnnotationsUpdated,
+        undefined,
+        fetcher
     );
 
     return { subtitleAnnotations, storage, settingsProvider, subtitleAnnotationsUpdated };

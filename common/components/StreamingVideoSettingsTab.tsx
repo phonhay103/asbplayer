@@ -1,4 +1,8 @@
 import SettingsTextField from '@project/common/components/SettingsTextField';
+import NumericSettingInput from '@project/common/components/NumericSettingInput';
+import InputAdornment from '@mui/material/InputAdornment';
+import MenuItem from '@mui/material/MenuItem';
+import TextField from '@mui/material/TextField';
 import Stack from '@mui/material/Stack';
 import Switch from '@mui/material/Switch';
 import TableContainer from '@mui/material/TableContainer';
@@ -28,6 +32,11 @@ const pageSettingsHasModifications = (page: Page) => {
     );
 };
 
+const sortedPageKeys = (pageConfigs: PageConfigMap) =>
+    Object.keys(pageConfigs)
+        .filter((key): key is keyof PageSettings => key in pageMetadata) // Can happen if extension supports more pages than this version of the app
+        .sort((a, b) => pageMetadata[a].title.localeCompare(pageMetadata[b].title));
+
 interface Props {
     settings: AsbplayerSettings;
     onSettingChanged: <K extends keyof AsbplayerSettings>(key: K, value: AsbplayerSettings[K]) => Promise<void>;
@@ -35,6 +44,7 @@ interface Props {
     insideApp?: boolean;
     extensionSupportsOverlay?: boolean;
     extensionSupportsPageSettings?: boolean;
+    extensionSupportsAnimatedImageCapture?: boolean;
     pageConfigs?: PageConfigMap;
 }
 
@@ -45,6 +55,7 @@ const StreamingVideoSettingsTab: React.FC<Props> = ({
     insideApp,
     extensionSupportsOverlay,
     extensionSupportsPageSettings,
+    extensionSupportsAnimatedImageCapture,
     pageConfigs,
 }) => {
     const { t } = useTranslation();
@@ -56,6 +67,9 @@ const StreamingVideoSettingsTab: React.FC<Props> = ({
         streamingTakeScreenshot,
         streamingCleanScreenshot,
         streamingCropScreenshot,
+        streamingMediaFragmentFormat,
+        streamingAnimatedImageFps,
+        streamingAnimatedImageQuality,
         streamingSubsDragAndDrop,
         streamingAutoSync,
         streamingAutoSyncPromptOnFailure,
@@ -171,6 +185,59 @@ const StreamingVideoSettingsTab: React.FC<Props> = ({
                     label={t('extension.settings.cropScreenshot')}
                     labelPlacement="start"
                 />
+                {extensionSupportsAnimatedImageCapture && (
+                    <TextField
+                        select
+                        fullWidth
+                        label={t('settings.mediaFragmentCaptureFormat')}
+                        value={streamingMediaFragmentFormat}
+                        onChange={(event) =>
+                            onSettingChanged(
+                                'streamingMediaFragmentFormat',
+                                event.target.value as AsbplayerSettings['streamingMediaFragmentFormat']
+                            )
+                        }
+                    >
+                        <MenuItem value="jpeg">{t('settings.mediaFragmentFormatScreenshot')}</MenuItem>
+                        <MenuItem value="webp">{t('settings.mediaFragmentFormatAnimatedWebp')}</MenuItem>
+                    </TextField>
+                )}
+                {extensionSupportsAnimatedImageCapture && streamingMediaFragmentFormat === 'webp' && (
+                    <>
+                        <NumericSettingInput
+                            label={t('settings.animatedImageFps')}
+                            fullWidth
+                            value={streamingAnimatedImageFps}
+                            color="primary"
+                            integerOnly
+                            onValueChange={(value) => void onSettingChanged('streamingAnimatedImageFps', value)}
+                            slotProps={{
+                                htmlInput: {
+                                    min: 1,
+                                    max: 60,
+                                    step: 1,
+                                },
+                                input: {
+                                    endAdornment: <InputAdornment position="end">fps</InputAdornment>,
+                                },
+                            }}
+                        />
+                        <NumericSettingInput
+                            label={t('settings.animatedImageQuality')}
+                            fullWidth
+                            value={streamingAnimatedImageQuality}
+                            color="primary"
+                            onValueChange={(value) => void onSettingChanged('streamingAnimatedImageQuality', value)}
+                            slotProps={{
+                                htmlInput: {
+                                    min: 0.1,
+                                    max: 1,
+                                    step: 0.05,
+                                },
+                            }}
+                        />
+                    </>
+                )}
                 <SettingsSection>{t('settings.subtitles')}</SettingsSection>
                 <SwitchLabelWithHoverEffect
                     control={
@@ -208,15 +275,10 @@ const StreamingVideoSettingsTab: React.FC<Props> = ({
                         <TableContainer variant="outlined" component={Paper} style={{ height: 'auto' }}>
                             <Table>
                                 <TableBody>
-                                    {Object.keys(pageConfigs).map((key) => {
-                                        const pageKey = key as keyof PageSettings;
+                                    {sortedPageKeys(pageConfigs).map((key) => {
+                                        const pageKey = key;
                                         const metadata = pageMetadata[pageKey];
                                         const page = settings.streamingPages[pageKey];
-
-                                        if (metadata === undefined || page === undefined) {
-                                            // Can happen if extension supports more pages than this version of the app
-                                            return null;
-                                        }
 
                                         return (
                                             <TableRowWithHoverEffect

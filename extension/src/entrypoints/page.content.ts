@@ -1,9 +1,12 @@
+import project from '@project/common/project';
+import { asbError } from '@project/common/util/log';
 import { currentPageDelegate } from '@/services/pages';
+import { configureExtensionLogProvider } from '@/services/extension-log-provider';
 
-const excludeGlobs = ['*://app.asbplayer.dev/*'];
+const excludeGlobs = [`*://${new URL(project.urls.app).hostname}/*`];
 
 if (import.meta.env.DEV) {
-    excludeGlobs.push('*://localhost:3000/*');
+    excludeGlobs.push(`*://${project.development.host}:${project.development.port}/*`);
 }
 
 export default defineContentScript({
@@ -14,6 +17,9 @@ export default defineContentScript({
     runAt: 'document_start',
 
     main() {
-        void currentPageDelegate().then((pageDelegate) => pageDelegate.loadScripts());
+        configureExtensionLogProvider();
+        void currentPageDelegate()
+            .then((pageDelegate) => pageDelegate.loadScripts())
+            .catch((error) => asbError('content', 'Failed to load page integration:', error));
     },
 });

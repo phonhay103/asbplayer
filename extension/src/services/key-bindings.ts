@@ -1,4 +1,5 @@
-import { asbError, ensureStoragePersisted, retryWithAnimationFrame } from '@project/common/util';
+import { asbError, asbTrace } from '@project/common/util/log';
+import { ensureStoragePersisted, retryWithAnimationFrame } from '@project/common/util';
 import type {
     OpenStatisticsMessage,
     SettingsUpdatedMessage,
@@ -19,6 +20,7 @@ type Unbinder = (() => void) | false;
 export default class KeyBindings {
     private _keyBinder: DefaultKeyBinder | undefined;
 
+    private _unbindRecipes?: () => void;
     private _unbindPlay: Unbinder = false;
     private _unbindAutoPause: Unbinder = false;
     private _unbindCondensedPlayback: Unbinder = false;
@@ -65,6 +67,19 @@ export default class KeyBindings {
         if (this._bound) {
             this.unbind();
         }
+
+        this._unbindRecipes = this._keyBinder.bindRecipes(
+            (event, action) => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                void context
+                    .selectRecipe(action)
+                    .catch((error) => asbError('playback/recipe', 'Recipe shortcut failed', { action, error }));
+            },
+            () => !context.synced,
+            () => context.subtitleController.subtitles,
+            true
+        );
 
         this._unbindPlay = this._keyBinder.bindPlay(
             (event) => {
@@ -208,6 +223,10 @@ export default class KeyBindings {
                 event.stopImmediatePropagation();
                 context.subtitleController.disabledSubtitleTracks[track] =
                     !context.subtitleController.disabledSubtitleTracks[track];
+                asbTrace('playback/subtitles', 'Toggled subtitle track display', {
+                    track,
+                    disabled: context.subtitleController.disabledSubtitleTracks[track],
+                });
                 context.subtitleController.refreshShowingSubtitles();
             },
             () => context.subtitleController.subtitles.length === 0,
@@ -284,14 +303,23 @@ export default class KeyBindings {
         this._unbindJumpToToken = this._keyBinder.bindJumpToToken(
             (event, target, forward) => {
                 const subtitles = context.subtitleController.subtitles;
+                const currentSelection = context.subtitleController.currentTokenSelectionLocation();
                 const match = findAdjacentTokenJumpMatch(
                     subtitles,
                     target,
                     forward,
                     context.currentTimeMs,
                     context.seekableTracks,
-                    context.subtitleController.currentTokenSelectionLocation()
+                    currentSelection
                 );
+                asbTrace('annotations/navigation', 'Resolved streaming token jump', {
+                    target,
+                    forward,
+                    timestampMs: context.currentTimeMs,
+                    seekableTracks: context.seekableTracks,
+                    currentSelection,
+                    match: match ? { subtitleIndex: match.subtitleIndex, tokenStart: match.tokenStart } : null,
+                });
                 if (!match) return false;
 
                 event.preventDefault();
@@ -494,6 +522,9 @@ export default class KeyBindings {
             this._unbindResetOffset = false;
         }
 
+        this._unbindRecipes?.();
+        this._unbindRecipes = undefined;
+
         if (this._unbindToggleRepeat) {
             this._unbindToggleRepeat();
             this._unbindToggleRepeat = false;
@@ -552,9 +583,27 @@ export default class KeyBindings {
 
     private _requestTokenSelection(context: Binding, target: TokenSelectionLocation) {
         this._cancelTokenSelectionRetry?.();
+        const maxAttempts = 60;
+        let attempts = 0;
+        asbTrace('annotations/selection', 'Requested streaming token selection', {
+            subtitleIndex: target.subtitleIndex,
+            tokenStart: target.tokenStart,
+            maxAttempts,
+        });
         this._cancelTokenSelectionRetry = retryWithAnimationFrame(
-            () => context.subtitleController.selectToken(target, { focusContainer: false }),
-            60,
+            () => {
+                attempts++;
+                const selected = context.subtitleController.selectToken(target, { focusContainer: false });
+                if (selected || attempts >= maxAttempts) {
+                    asbTrace(
+                        'annotations/selection',
+                        selected ? 'Selected streaming token' : 'Streaming token selection retry limit reached',
+                        { subtitleIndex: target.subtitleIndex, tokenStart: target.tokenStart, attempts }
+                    );
+                }
+                return selected;
+            },
+            maxAttempts,
             { runImmediately: true }
         );
     }

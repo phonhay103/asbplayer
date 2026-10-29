@@ -59,17 +59,21 @@ const htmlOptions = {
     timelineSubtitles: [makeTextSubtitle(1000, 2000, 'one', 0)],
 };
 
-const plan = (subtitles: IndexedSubtitleModel[], playModes: PlayMode[] = [PlayMode.normal], durationMs = 20_000) =>
+const plan = (
+    subtitles: IndexedSubtitleModel[],
+    options?: { readonly playModes?: PlayMode[]; readonly durationMs?: number }
+) =>
     buildPlaybackPlan({
         subtitles,
-        durationMs,
-        playModes: new Set(playModes),
+        durationMs: options?.durationMs ?? 20_000,
+        playModes: new Set(options?.playModes ?? [PlayMode.normal]),
         autoPausePreference: AutoPausePreference.atStartAndEnd,
         subtitleTriggerStartOffset: 0,
         subtitleTriggerEndOffset: 0,
         subtitleTriggerGapEndOffset: 0,
         subtitleTriggerGapStartOffset: 0,
         repeatCountPreference: 1,
+        repeatsBeforeShowingSubtitles: 0,
         condensedPlaybackMinimumSkipIntervalMs: 500,
         playbackRate: 1,
         fastForwardModePlaybackRate: 2,
@@ -100,7 +104,10 @@ describe('playbackTimelineToHtml', () => {
         expect(exportPlan.condensed).toBeDefined();
         expect(exportPlan.condensed?.pauseAtStart).toBe(true);
         expect(exportPlan.timelineSubtitles.blocks[0].startAction).toBe(true);
-        expect(exportPlan.timelineSubtitles.blocks[0].endAction).toEqual({ pause: true, repeat: { count: 2 } });
+        expect(exportPlan.timelineSubtitles.blocks[0].endAction).toEqual({
+            pause: true,
+            repeat: { count: 2, repeatsBeforeShowingSubtitles: 0 },
+        });
     });
 
     it('renders full-width ten-second rows and escapes subtitle text', () => {
@@ -136,7 +143,10 @@ describe('playbackTimelineToHtml', () => {
         expect([...parsed.querySelectorAll('label')].map((label) => label.textContent)).toContain('Fast forward label');
         expect(parsed.querySelector('h2')?.textContent).toBe('Playback modes');
         expect(html).not.toContain('seekable');
-        expect(parsed.querySelector('select[data-track-select] option')?.textContent).toBe('Track 1');
+        const trackCheckbox = parsed.querySelector<HTMLInputElement>('input[type="checkbox"][data-track="0"]');
+        expect(trackCheckbox?.parentElement?.textContent).toBe('Track 1');
+        expect(trackCheckbox?.checked).toBe(true);
+        expect(parsed.querySelector('select')).toBeNull();
         expect(html).not.toContain('Subtitle Track');
         expect(html).not.toContain('>All<');
         expect(parsed.querySelector('.settings-summary')).not.toBeNull();
@@ -164,7 +174,10 @@ describe('playbackTimelineToHtml', () => {
 
     it('formats subtitle hover timestamps with millisecond precision', () => {
         const html = playbackTimelineToHtml({
-            plan: plan([makeTextSubtitle(101_580, 104_050, 'one', 0)], [PlayMode.normal], 120_000),
+            plan: plan([makeTextSubtitle(101_580, 104_050, 'one', 0)], {
+                playModes: [PlayMode.normal],
+                durationMs: 120_000,
+            }),
             themeColor: '#123456',
             modeLabels,
             ...htmlOptions,
@@ -175,10 +188,9 @@ describe('playbackTimelineToHtml', () => {
 
     it('renders playback modes using their distinct visual markers', () => {
         const html = playbackTimelineToHtml({
-            plan: plan(
-                [makeTextSubtitle(1000, 2000, 'one', 0), makeTextSubtitle(5000, 6000, 'two', 1)],
-                [PlayMode.fastForward, PlayMode.autoPause, PlayMode.repeat]
-            ),
+            plan: plan([makeTextSubtitle(1000, 2000, 'one', 0), makeTextSubtitle(5000, 6000, 'two', 1)], {
+                playModes: [PlayMode.fastForward, PlayMode.autoPause, PlayMode.repeat],
+            }),
             themeColor: '#123456',
             modeLabels,
             ...htmlOptions,
@@ -197,7 +209,7 @@ describe('playbackTimelineToHtml', () => {
 
     it('renders coincident auto-pause and repeat markers as stacked bands', () => {
         const html = playbackTimelineToHtml({
-            plan: plan([makeTextSubtitle(1000, 2000, 'one', 0)], [PlayMode.autoPause, PlayMode.repeat]),
+            plan: plan([makeTextSubtitle(1000, 2000, 'one', 0)], { playModes: [PlayMode.autoPause, PlayMode.repeat] }),
             themeColor: '#123456',
             modeLabels,
             ...htmlOptions,
@@ -227,10 +239,9 @@ describe('playbackTimelineToHtml', () => {
 
     it('renders condensed gaps and an empty timeline without throwing', () => {
         const condensedHtml = playbackTimelineToHtml({
-            plan: plan(
-                [makeTextSubtitle(1000, 2000, 'one', 0), makeTextSubtitle(5000, 6000, 'two', 1)],
-                [PlayMode.condensed]
-            ),
+            plan: plan([makeTextSubtitle(1000, 2000, 'one', 0), makeTextSubtitle(5000, 6000, 'two', 1)], {
+                playModes: [PlayMode.condensed],
+            }),
             themeColor: '#123456',
             modeLabels,
             ...htmlOptions,
@@ -399,6 +410,7 @@ describe('playbackTimelineToHtml', () => {
                 subtitleTriggerGapEndOffset: paritySettings.subtitleTriggerGapEndOffsetMs,
                 subtitleTriggerGapStartOffset: paritySettings.subtitleTriggerGapStartOffsetMs,
                 repeatCountPreference: 1,
+                repeatsBeforeShowingSubtitles: 0,
                 condensedPlaybackMinimumSkipIntervalMs: paritySettings.condensedMinimumSkipIntervalMs,
                 playbackRate: 1,
                 fastForwardModePlaybackRate: 2,
@@ -469,10 +481,14 @@ describe('playbackTimelineToHtml', () => {
 
         expect(document.querySelector('.timeline')?.innerHTML).toBe(expectedTimeline);
 
-        const trackSelect = document.querySelector<HTMLSelectElement>('select[data-track-select]');
-        expect(trackSelect).not.toBeNull();
-        trackSelect!.value = '1';
-        trackSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+        const firstTrackCheckbox = document.querySelector<HTMLInputElement>('input[data-track="0"]');
+        const secondTrackCheckbox = document.querySelector<HTMLInputElement>('input[data-track="1"]');
+        expect(firstTrackCheckbox).not.toBeNull();
+        expect(secondTrackCheckbox).not.toBeNull();
+        secondTrackCheckbox!.checked = true;
+        secondTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+        firstTrackCheckbox!.checked = false;
+        firstTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
 
         const secondTrackHtml = playbackTimelineToHtml({
             plan: buildParityPlan([secondTrack]),
@@ -508,7 +524,7 @@ describe('playbackTimelineToHtml', () => {
         const allTracks = [...firstTrack, ...secondTrack];
         const buildParityPlan = (
             selectedSubtitles: IndexedSubtitleModel[],
-            settings: Partial<typeof paritySettings> = {}
+            settings?: Partial<typeof paritySettings>
         ) => {
             const effectiveSettings = { ...paritySettings, ...settings };
             const runtimePlan = buildPlaybackPlan({
@@ -522,6 +538,7 @@ describe('playbackTimelineToHtml', () => {
                 subtitleTriggerGapEndOffset: effectiveSettings.subtitleTriggerGapEndOffsetMs,
                 subtitleTriggerGapStartOffset: effectiveSettings.subtitleTriggerGapStartOffsetMs,
                 repeatCountPreference: 2,
+                repeatsBeforeShowingSubtitles: 0,
                 condensedPlaybackMinimumSkipIntervalMs: effectiveSettings.condensedMinimumSkipIntervalMs,
                 playbackRate: 1.25,
                 fastForwardModePlaybackRate: 2.5,
@@ -618,10 +635,27 @@ describe('playbackTimelineToHtml', () => {
             expect(document.querySelector('.timeline')?.innerHTML).toBe(expectedTimeline);
         }
 
-        const trackSelect = document.querySelector<HTMLSelectElement>('select[data-track-select]');
-        expect(trackSelect).not.toBeNull();
-        trackSelect!.value = '1';
-        trackSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+        const firstTrackCheckbox = document.querySelector<HTMLInputElement>('input[data-track="0"]');
+        const secondTrackCheckbox = document.querySelector<HTMLInputElement>('input[data-track="1"]');
+        expect(firstTrackCheckbox).not.toBeNull();
+        expect(secondTrackCheckbox).not.toBeNull();
+        secondTrackCheckbox!.checked = true;
+        secondTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+
+        const expectedCombinedHtml = playbackTimelineToHtml({
+            plan: buildParityPlan(allTracks, effectiveSettings),
+            themeColor: '#123456',
+            modeLabels,
+            ...parityOptions,
+            timelineSettings: effectiveSettings,
+        });
+        const expectedCombinedTimeline = new DOMParser()
+            .parseFromString(expectedCombinedHtml, 'text/html')
+            .querySelector('.timeline')?.innerHTML;
+        expect(document.querySelector('.timeline')?.innerHTML).toBe(expectedCombinedTimeline);
+
+        firstTrackCheckbox!.checked = false;
+        firstTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
 
         const expectedSecondTrackHtml = playbackTimelineToHtml({
             plan: buildParityPlan(secondTrack, effectiveSettings),
@@ -636,9 +670,9 @@ describe('playbackTimelineToHtml', () => {
         expect(document.querySelector('.timeline')?.innerHTML).toBe(expectedSecondTrackTimeline);
     });
 
-    it('can switch the timeline to another subtitle track', () => {
-        const firstTrack = makeTextSubtitle(1000, 2000, 'one', 0, 0);
-        const secondTrack = makeTextSubtitle(3000, 4000, 'two', 1, 1);
+    it('can combine subtitle tracks and remove a track but keeps the last track selected', () => {
+        const firstTrack = makeTextSubtitle(1000, 2000, 'one', 0, 1);
+        const secondTrack = makeTextSubtitle(3000, 4000, 'two', 1, 3);
         const html = playbackTimelineToHtml({
             plan: plan([firstTrack]),
             themeColor: '#123456',
@@ -646,8 +680,8 @@ describe('playbackTimelineToHtml', () => {
             ...htmlOptions,
             timelineSubtitles: [firstTrack, secondTrack],
             timelineTracks: [
-                { track: 0, label: 'Track 1' },
                 { track: 1, label: 'Track 2' },
+                { track: 3, label: '<Track 4 &>' },
             ],
         });
         const parsed = new DOMParser().parseFromString(html, 'text/html');
@@ -657,12 +691,67 @@ describe('playbackTimelineToHtml', () => {
         document.body.innerHTML = parsed.body.innerHTML;
 
         window.eval(scriptText ?? '');
-        const trackSelect = document.querySelector<HTMLSelectElement>('select[data-track-select]');
-        expect(trackSelect).not.toBeNull();
-        trackSelect!.value = '1';
-        trackSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+        const firstTrackCheckbox = document.querySelector<HTMLInputElement>('input[type="checkbox"][data-track="1"]');
+        const secondTrackCheckbox = document.querySelector<HTMLInputElement>('input[type="checkbox"][data-track="3"]');
+        expect(firstTrackCheckbox?.checked).toBe(true);
+        expect(secondTrackCheckbox?.checked).toBe(false);
+        expect(secondTrackCheckbox?.parentElement?.textContent).toBe('<Track 4 &>');
+        const subtitleLabels = () => [...document.querySelectorAll('.event.normal')].map((event) => event.textContent);
+        expect(subtitleLabels()).toEqual(['0 | one']);
 
-        expect(document.querySelector('.event.normal')?.textContent).toContain('1 | two');
-        expect(document.querySelector('.event.normal')?.textContent).not.toContain('0 | one');
+        secondTrackCheckbox!.checked = true;
+        secondTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(firstTrackCheckbox?.checked).toBe(true);
+        expect(subtitleLabels()).toEqual(['0 | one', '1 | two']);
+
+        const input = document.querySelector<HTMLInputElement>('input[data-setting="subtitleTriggerStartOffsetMs"]');
+        input!.value = '500';
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+        expect(subtitleLabels()).toEqual(['0 | one', '1 | two']);
+        const pauseStartPositions = () =>
+            [...document.querySelectorAll<HTMLElement>('.event.autoPause-start')].map((event) => event.style.left);
+        expect(pauseStartPositions()).toEqual(['15%', '35%']);
+
+        firstTrackCheckbox!.checked = false;
+        firstTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(subtitleLabels()).toEqual(['1 | two']);
+        expect(pauseStartPositions()).toEqual(['35%']);
+
+        const timelineWithOneTrack = document.querySelector('.timeline')?.innerHTML;
+        secondTrackCheckbox!.checked = false;
+        secondTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(secondTrackCheckbox?.checked).toBe(true);
+        expect(document.querySelector('.timeline')?.innerHTML).toBe(timelineWithOneTrack);
+
+        firstTrackCheckbox!.checked = true;
+        firstTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+        secondTrackCheckbox!.checked = false;
+        secondTrackCheckbox!.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(subtitleLabels()).toEqual(['0 | one']);
+        expect(pauseStartPositions()).toEqual(['15%']);
+    });
+
+    it('keeps an empty timeline usable when there are no subtitle tracks', () => {
+        const html = playbackTimelineToHtml({
+            plan: plan([]),
+            themeColor: '#123456',
+            modeLabels,
+            ...htmlOptions,
+            timelineSubtitles: [],
+            timelineTracks: [],
+        });
+        const parsed = new DOMParser().parseFromString(html, 'text/html');
+        const script = parsed.querySelector('script');
+        const scriptText = script?.textContent;
+        script?.remove();
+        document.body.innerHTML = parsed.body.innerHTML;
+
+        window.eval(scriptText ?? '');
+
+        expect(document.querySelectorAll('input[data-track]')).toHaveLength(0);
+        expect(document.querySelectorAll('.row')).toHaveLength(2);
+        expect(
+            document.querySelector('.event.normal, .event.autoPause-start, .event.autoPause-end, .event.repeat')
+        ).toBeNull();
     });
 });

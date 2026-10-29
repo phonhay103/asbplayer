@@ -34,6 +34,7 @@ export interface Token {
     status?: TokenStatus | null; // null means "error"
     readings: TokenReading[];
     frequency?: number | null; // null means no frequency data
+    gloss?: string | null; // null means no gloss data
     pitchAccent?: PitchAccentPosition | null; // null means no pitch accent data
     groupingKey?: string; // Stable key for equivalence aggregation
     lemmasGroupingKey?: string; // Stable key for equivalence aggregation based on lemmas (statistics)
@@ -123,8 +124,11 @@ export enum MediaFragmentErrorCode {
 
 export interface MediaFragmentModel {
     readonly base64: string;
-    readonly extension: 'jpeg' | 'webm';
+    readonly extension: 'jpeg' | 'webm' | 'webp';
     readonly error?: MediaFragmentErrorCode;
+    // Whether the image has more than one frame. Formats like webp can be either, so this can't be inferred from
+    // the extension. Stored in the mining history, so later versions must keep reading it the same way.
+    readonly animated?: boolean;
 }
 
 export const ImageErrorCode = MediaFragmentErrorCode;
@@ -134,6 +138,7 @@ export type ImageModel = MediaFragmentModel;
 export enum AudioErrorCode {
     drmProtected = 1,
     fileLinkLost = 2,
+    captureFailed = 3,
 }
 
 export interface AudioModel {

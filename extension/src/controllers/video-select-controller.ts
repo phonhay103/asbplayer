@@ -1,4 +1,5 @@
-import { asbError } from '@project/common/util';
+import project from '@project/common/project';
+import { asbError } from '@project/common/util/log';
 import type {
     CaptureVisibleTabMessage,
     ForegroundToExtensionCommand,
@@ -38,18 +39,18 @@ export default class VideoSelectController {
         this._isBindingsSorted = options.isBindingsSorted;
         this._frame = uiFrameForHtml(
             async (lang) => `<!DOCTYPE html>
-                <html lang="en">
+                <html lang="${encodeURIComponent(lang)}">
                 <head>
                     <meta charset="utf-8" />
                     <meta name="viewport" content="width=device-width, initial-scale=1" />
-                    <title>asbplayer - Video Select</title>
+                    <title>${project.names.short} - Video Select</title>
                     <style>
                         @import url(${browser.runtime.getURL('/fonts/fonts.css')});
                         ${frameColorSchemeStyleBlock()}
                     </style>
                 </head>
                 <body>
-                    <div id="root" style="width:100%;height:100vh;"></div>
+                    <div id="root" style="width:100%;height:100dvh;"></div>
                     <script type="application/json" id="loc">${JSON.stringify(await fetchLocalization(lang))}</script>
                     <script type="module" src="${browser.runtime.getURL('/video-select-ui.js')}"></script>
                 </body>

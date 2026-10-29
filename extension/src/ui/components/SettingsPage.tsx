@@ -1,3 +1,4 @@
+import project from '@project/common/project';
 import type { CardModel } from '@project/common';
 import { HttpFetcher } from '@project/common';
 import { useCallback, useMemo } from 'react';
@@ -5,6 +6,7 @@ import { makeStyles } from '@mui/styles';
 import { useTranslation } from 'react-i18next';
 import Box from '@mui/material/Box';
 import SettingsForm from '@project/common/components/SettingsForm';
+import { isFirefoxBuild } from '@project/extension/src/services/build-flags';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
@@ -20,13 +22,15 @@ import { testCard } from '@project/common/settings';
 import { useTheme } from '@mui/material/styles';
 import type { Theme } from '@mui/material/styles';
 import { settingsPageConfigs } from '@/services/pages';
+import { openExtensionShortcuts } from '@/services/extension-shortcuts';
 import type { DictionaryProvider } from '@project/common/dictionary-db';
+import type { LogProvider } from '@project/common/util/log';
 import { useLocationHash } from '@project/common/hooks/use-location-hash';
 
 const useStyles = makeStyles<Theme>((theme) => ({
     root: {
         '& .MuiPaper-root': {
-            height: '100vh',
+            height: '100dvh',
         },
     },
     content: {
@@ -40,6 +44,7 @@ const useStyles = makeStyles<Theme>((theme) => ({
 
 interface Props {
     dictionaryProvider: DictionaryProvider;
+    logProvider: LogProvider;
     settings: AsbplayerSettings;
     onSettingsChanged: (settings: Partial<AsbplayerSettings>) => void;
     profiles: Profile[];
@@ -61,6 +66,7 @@ const extensionTestCard: () => Promise<CardModel> = () => {
 
 const SettingsPage = ({
     dictionaryProvider,
+    logProvider,
     settings,
     inTutorial,
     inAnnotationTutorial,
@@ -90,11 +96,7 @@ const SettingsPage = ({
 
     const commands = useCommandKeyBinds();
 
-    const handleOpenExtensionShortcuts = useCallback(() => {
-        void browser.tabs.create({ active: true, url: 'chrome://extensions/shortcuts' });
-    }, []);
-
-    const { initialized: i18nInitialized } = useI18n({ language: settings?.language ?? 'en' });
+    const { initialized: i18nInitialized } = useI18n({ language: settings?.language ?? project.defaultLanguage });
     const { supportedLanguages } = useSupportedLanguages();
 
     const { hash: scrollToId } = useLocationHash();
@@ -104,7 +106,7 @@ const SettingsPage = ({
     }
 
     return (
-        <Paper square style={{ height: '100vh' }}>
+        <Paper square style={{ height: '100dvh' }}>
             <Dialog open={true} maxWidth="md" fullWidth className={classes.root} onClose={() => {}}>
                 <DialogTitle>{t('settings.title')}</DialogTitle>
                 <DialogContent className={classes.content}>
@@ -118,11 +120,13 @@ const SettingsPage = ({
                         extensionSupportsOrderableAnkiFields
                         extensionSupportsTrackSpecificSettings
                         extensionSupportsSubtitlesWidthSetting
+                        extensionSupportsSubtitlesWidthInPixels
                         extensionSupportsPauseOnHover
                         extensionSupportsPlaybackEngine
                         extensionSupportsAutoPauseResume
                         extensionSupportsExportCardBind
                         extensionSupportsPageSettings
+                        extensionSupportsAnimatedImageCapture={!isFirefoxBuild}
                         extensionSupportsDictionary
                         extensionSupportsDictionaryBrowser
                         extensionSupportsDictionaryWaniKani
@@ -130,13 +134,17 @@ const SettingsPage = ({
                         extensionSupportsSeekableTrackSetting
                         extensionSupportsAutoCopyableTrackSetting
                         extensionSupportsDictionaryTokenStatusDisplayAlpha
+                        supportsDictionaryPlayback
                         extensionSupportsDictionaryYomitanMecab
                         extensionSupportsSubtitleTrackSelectorInWebApp
                         extensionSupportsSubtitleListCustomization
+                        extensionSupportsUpdateLastWithSameSubtitleText
+                        extensionSupportsAnimatedMediaFragment={!isFirefoxBuild}
                         chromeKeyBinds={commands}
-                        onOpenChromeExtensionShortcuts={handleOpenExtensionShortcuts}
+                        onOpenChromeExtensionShortcuts={openExtensionShortcuts}
                         onSettingsChanged={onSettingsChanged}
                         dictionaryProvider={dictionaryProvider}
+                        logProvider={logProvider}
                         settings={settings}
                         profiles={profileContext.profiles}
                         activeProfile={profileContext.activeProfile}

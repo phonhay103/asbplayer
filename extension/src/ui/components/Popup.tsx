@@ -16,6 +16,7 @@ import { useLocalFontFamilies } from '@project/common/hooks';
 import { Anki } from '@project/common/anki';
 import { useSupportedLanguages } from '@project/extension/src/ui/hooks/use-supported-languages';
 import { useI18n } from '@project/extension/src/ui/hooks/use-i18n';
+import { isFirefoxBuild } from '@/services/build-flags';
 import { isMobile } from 'react-device-detect';
 import { useTheme } from '@mui/material/styles';
 import SettingsProfileSelectMenu from '@project/common/components/SettingsProfileSelectMenu';
@@ -25,6 +26,7 @@ import TutorialIcon from '@project/common/components/TutorialIcon';
 import BarChartIcon from '@mui/icons-material/BarChart';
 import Paper from '@mui/material/Paper';
 import type { DictionaryProvider } from '@project/common/dictionary-db';
+import type { LogProvider } from '@project/common/util/log';
 import { useAnnotationTutorial } from '@project/common/hooks/use-annotation-tutorial';
 import { ExtensionGlobalStateProvider } from '@/services/extension-global-state-provider';
 import { uiTabRegistry, useMediaId, useLastMediaIdOnce } from '@project/extension/src/ui/hooks/use-media-id';
@@ -38,6 +40,7 @@ const globalStateProvider = new ExtensionGlobalStateProvider();
 
 interface Props {
     dictionaryProvider: DictionaryProvider;
+    logProvider: LogProvider;
     settings: AsbplayerSettings;
     commands: any;
     onSettingsChanged: (settings: Partial<AsbplayerSettings>) => void;
@@ -67,6 +70,23 @@ class ExtensionFetcher implements Fetcher {
     }
 }
 
+const handleUnlockLocalFonts = () => {
+    void browser.tabs.create({
+        url: `${browser.runtime.getURL('/options.html')}#subtitle-appearance`,
+        active: true,
+    });
+};
+
+// Firefox closes the popup when a file picker opens (https://bugzilla.mozilla.org/show_bug.cgi?id=1292701),
+// so importing must happen in the options page instead
+const handleFirefoxImportSettings = () => {
+    void browser.tabs.create({
+        url: `${browser.runtime.getURL('/options.html')}#misc-settings`,
+        active: true,
+    });
+    window.close();
+};
+
 const NavButton: React.FC<ButtonProps & { label: string }> = ({ label, ...buttonProps }) => {
     const [isOverflowing, setIsOverflowing] = useState<boolean>();
     return (
@@ -93,6 +113,7 @@ const NavButton: React.FC<ButtonProps & { label: string }> = ({ label, ...button
 
 const Popup = ({
     dictionaryProvider,
+    logProvider,
     settings,
     commands,
     onOpenApp,
@@ -105,12 +126,6 @@ const Popup = ({
     const { t } = useTranslation();
     const { initialized: i18nInitialized } = useI18n({ language: settings.language });
     const anki = useMemo(() => new Anki(settings, new ExtensionFetcher()), [settings]);
-    const handleUnlockLocalFonts = useCallback(() => {
-        void browser.tabs.create({
-            url: `${browser.runtime.getURL('/options.html')}#subtitle-appearance`,
-            active: true,
-        });
-    }, []);
     const { supportedLanguages } = useSupportedLanguages();
     const { localFontsAvailable, localFontsPermission, localFontFamilies } = useLocalFontFamilies();
     const theme = useTheme();
@@ -212,6 +227,7 @@ const Popup = ({
                 >
                     {!statisticsOpen && (
                         <SettingsForm
+                            onImportSettings={isFirefoxBuild ? handleFirefoxImportSettings : undefined}
                             heightConstrained
                             extensionInstalled
                             extensionVersion={browser.runtime.getManifest().version}
@@ -221,11 +237,13 @@ const Popup = ({
                             extensionSupportsOrderableAnkiFields
                             extensionSupportsTrackSpecificSettings
                             extensionSupportsSubtitlesWidthSetting
+                            extensionSupportsSubtitlesWidthInPixels
                             extensionSupportsPauseOnHover
                             extensionSupportsPlaybackEngine
                             extensionSupportsAutoPauseResume
                             extensionSupportsExportCardBind
                             extensionSupportsPageSettings
+                            extensionSupportsAnimatedImageCapture={!isFirefoxBuild}
                             extensionSupportsDictionary
                             extensionSupportsDictionaryBrowser
                             extensionSupportsDictionaryWaniKani
@@ -233,13 +251,17 @@ const Popup = ({
                             extensionSupportsSeekableTrackSetting
                             extensionSupportsAutoCopyableTrackSetting
                             extensionSupportsDictionaryTokenStatusDisplayAlpha
+                            supportsDictionaryPlayback
                             extensionSupportsDictionaryYomitanMecab
                             extensionSupportsSubtitleTrackSelectorInWebApp
                             extensionSupportsSubtitleListCustomization
+                            extensionSupportsUpdateLastWithSameSubtitleText
+                            extensionSupportsAnimatedMediaFragment={!isFirefoxBuild}
                             forceVerticalTabs={false}
                             anki={anki}
                             chromeKeyBinds={chromeCommandBindsToKeyBinds(commands)}
                             dictionaryProvider={dictionaryProvider}
+                            logProvider={logProvider}
                             settings={settings}
                             profiles={profilesContext.profiles}
                             activeProfile={profilesContext.activeProfile}

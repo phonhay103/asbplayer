@@ -7,6 +7,8 @@ import {
     buildSubtitleTracks,
     clamp,
     compareSubtitlesForDisplay,
+    compareField,
+    fieldsEqual,
     computeStyles,
     computeStyleString,
     download,
@@ -32,7 +34,7 @@ import {
     iterateOverStringInBlocks,
     joinSubtitles,
     keysAreEqual,
-    localizedDate,
+    localizeDateTime,
     mapAsync,
     mockSurroundingSubtitles,
     normalizeFinite,
@@ -52,6 +54,7 @@ import {
     timeDurationDisplay,
     clampMediaTimestamp,
 } from '@project/common/util';
+import type { FieldComparators } from '@project/common/util';
 import type { TextSubtitleSettings } from '@project/common/settings';
 import { calculateSeekableTracksValue } from '@project/common/settings';
 import type { Progress } from '@project/common';
@@ -225,7 +228,42 @@ describe('humanReadableTime', () => {
     });
 
     it('formats localized dates with hour, minute, and second fields', () => {
-        expect(localizedDate(Date.UTC(2026, 0, 1, 13, 2, 3), 'en-US', 'UTC')).toBe('01:02:03 PM');
+        expect(localizeDateTime(Date.UTC(2026, 0, 1, 13, 2, 3), { locales: 'en-US', timeZone: 'UTC' })).toBe(
+            '01:02:03 PM'
+        );
+    });
+
+    it('formats localized dates with milliseconds when requested', () => {
+        expect(
+            localizeDateTime(Date.UTC(2026, 0, 1, 13, 2, 3, 123), {
+                locales: 'en-US',
+                timeZone: 'UTC',
+                includeMilliseconds: true,
+            })
+        ).toBe('01:02:03.123 PM');
+    });
+
+    it('formats localized dates in 24-hour time when requested', () => {
+        expect(
+            localizeDateTime(Date.UTC(2026, 0, 1, 13, 2, 3, 123), {
+                locales: 'en-US',
+                timeZone: 'UTC',
+                hour12: false,
+                includeMilliseconds: true,
+            })
+        ).toBe('13:02:03.123');
+    });
+
+    it('includes the date in the requested time zone', () => {
+        expect(
+            localizeDateTime(Date.UTC(2026, 0, 1, 0, 30, 0, 123), {
+                locales: 'en-US',
+                timeZone: 'America/New_York',
+                hour12: false,
+                includeMilliseconds: true,
+                includeDate: true,
+            })
+        ).toBe('12/31/2025 19:30:00.123');
     });
 
     it('formats 0 milliseconds', () => {
@@ -895,7 +933,7 @@ describe('ensureStoragePersisted', () => {
 
         await expect(ensureStoragePersisted()).resolves.toBe(false);
         expect(warn).toHaveBeenCalledWith(
-            '[asbplayer][storage]',
+            expect.stringContaining('[asbplayer][storage]'),
             'Storage could not be persisted, data may be cleared by the browser'
         );
     });
@@ -1077,6 +1115,7 @@ describe('areTokenizationsEqual', () => {
                 states: ['ignored'],
                 readings: [{ pos: [0, 1], reading: 'a' }],
                 frequency: 1,
+                gloss: 'first',
                 groupingKey: 'group-a',
             },
         ],
@@ -1096,6 +1135,7 @@ describe('areTokenizationsEqual', () => {
                     pos: [...token.pos],
                     states: [...token.states],
                     readings: token.readings.map((reading: any) => ({ ...reading, pos: [...reading.pos] })),
+                    gloss: token.gloss,
                 })),
             })
         ).toBe(true);
@@ -1255,4 +1295,68 @@ it('maps showing and invisible subtitles in display order with their visibility'
         { track: 2, index: 0, visible: true },
         { track: 2, index: 2, visible: false },
     ]);
+});
+
+interface Example {
+    id: number;
+    label?: string;
+    values: number[];
+}
+
+const comparators: FieldComparators<Example> = {
+    id: (a, b) => a === b,
+    label: (a, b) => a === b,
+    values: (a, b) => arrayEquals(a, b),
+};
+const example: Example = { id: 1, label: 'first', values: [1, 2] };
+
+describe('fieldsEqual', () => {
+    it('compares separately allocated values regardless of key order', () => {
+        expect(fieldsEqual(example, { values: [1, 2], label: 'first', id: 1 }, comparators)).toBe(true);
+    });
+
+    it.each([{ id: 2 }, { label: 'second' }, { label: undefined }, { values: [1, 3] }, { values: [1] }])(
+        'detects a changed field: %j',
+        (change) => {
+            expect(fieldsEqual(example, { ...example, ...change }, comparators)).toBe(false);
+        }
+    );
+
+    it('handles missing objects and identical references', () => {
+        expect(fieldsEqual(undefined, undefined, comparators)).toBe(true);
+        expect(fieldsEqual(example, undefined, comparators)).toBe(false);
+        expect(fieldsEqual(undefined, example, comparators)).toBe(false);
+        expect(fieldsEqual(example, example, comparators)).toBe(true);
+    });
+
+    it('compares empty objects', () => {
+        expect(fieldsEqual({}, {}, {})).toBe(true);
+    });
+
+    it.each([
+        { content: 'first', color: 'red', expected: true },
+        { content: 'first', color: 'blue', expected: true },
+        { content: 'second', color: 'red', expected: false },
+        { content: 'second', color: 'blue', expected: false },
+    ])('accepts allowed differences per field: %j', ({ content, color, expected }) => {
+        const original = { content: 'first', color: 'red' };
+        const equality: FieldComparators<typeof original> = {
+            content: (a, b) => a === b,
+            color: (a, b) => a === b,
+        };
+        const allowedDifferences: FieldComparators<typeof original> = {
+            content: () => false,
+            color: () => true,
+        };
+        expect(fieldsEqual(original, { content, color }, equality, allowedDifferences)).toBe(expected);
+    });
+});
+
+describe('compareField', () => {
+    it('uses the selected field comparator', () => {
+        const changed: Example = { id: 2, values: [1, 2] };
+        expect(compareField('id', example, changed, comparators)).toBe(false);
+        expect(compareField('values', example, changed, comparators)).toBe(true);
+        expect(compareField('label', example, changed, comparators)).toBe(false);
+    });
 });

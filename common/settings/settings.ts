@@ -7,6 +7,9 @@ import type {
 } from '@project/common/src/model';
 import { AutoPausePreference } from '@project/common/src/model';
 import { arrayEquals } from '@project/common/util/array-equals';
+import { compareField, fieldsEqual } from '@project/common/util';
+import type { FieldComparators } from '@project/common/util';
+import type { Recipe } from '@project/common/settings/settings-recipes';
 import type { DictionarySettings } from '@project/common/settings/settings-dictionary';
 
 export const activeProfileKey = 'activeSettingsProfile';
@@ -39,6 +42,7 @@ export enum AutoPauseResumeMode {
 export enum SubtitleVisibility {
     whenDue = 'whenDue',
     whilePaused = 'whilePaused',
+    whileManuallyPaused = 'whileManuallyPaused',
 }
 
 export enum VideoSubtitleSplitBehavior {
@@ -83,6 +87,8 @@ export interface PlaybackPosition {
 }
 
 export interface MiscSettings {
+    readonly recipes: Recipe[];
+    readonly activeRecipeId: number | null;
     readonly themeType: 'dark' | 'light';
     readonly videoSubtitleSplitBehavior: VideoSubtitleSplitBehavior;
     readonly showSubtitleListMiningButton: boolean;
@@ -111,6 +117,7 @@ export interface MiscSettings {
     readonly fastForwardPlaybackMinimumSkipIntervalMs: number;
     readonly streamingCondensedPlaybackMinimumSkipIntervalMs: number;
     readonly repeatCountPreference: number;
+    readonly repeatsBeforeShowingSubtitles: number;
     readonly rememberPlaybackModes: boolean;
     readonly lastPlaybackModes: PlayMode[];
     readonly lastPlaybackPositions: PlaybackPosition[];
@@ -139,7 +146,7 @@ export type AutoPausePreferenceEdge = AutoPausePreference.atStart | AutoPausePre
 export const autoPausePreferenceForCheckboxChange = (
     preference: AutoPausePreference,
     edge: AutoPausePreferenceEdge,
-    checked: boolean
+    { checked }: { readonly checked: boolean }
 ): AutoPausePreference => {
     let pauseAtStart = preference !== AutoPausePreference.atEnd;
     let pauseAtEnd = preference !== AutoPausePreference.atStart;
@@ -204,6 +211,7 @@ export type AnkiSettingsFieldKey =
 
 export type MediaFragmentFormatSetting = 'jpeg' | 'webm';
 
+// Any setting being added here also needs to be added to SettingsAccessor in use-anki.ts
 export interface AnkiSettings {
     readonly ankiConnectUrl: string;
     readonly ankiConnectApiKey: string;
@@ -224,6 +232,8 @@ export interface AnkiSettings {
     readonly tags: string[];
     readonly recordWithAudioPlayback: boolean;
     readonly preferMp3: boolean;
+    readonly alwaysUseSubtitleForSentence: boolean;
+    readonly updateLastCardForSameSubtitle: boolean;
     readonly audioPaddingStart: number;
     readonly audioPaddingEnd: number;
     readonly maxImageWidth: number;
@@ -232,6 +242,7 @@ export interface AnkiSettings {
     readonly mediaFragmentTrimStart: number;
     readonly mediaFragmentTrimEnd: number;
     readonly mediaFragmentMaxClipLength: number;
+    readonly trimBlackBars: boolean;
     readonly surroundingSubtitlesCountRadius: number;
     readonly surroundingSubtitlesTimeRadius: number;
     readonly ankiFieldSettings: AnkiFieldSettings;
@@ -278,6 +289,8 @@ const ankiSettingsKeysObject: { [key in keyof AnkiSettings]: boolean } = {
     tags: true,
     recordWithAudioPlayback: true,
     preferMp3: true,
+    alwaysUseSubtitleForSentence: true,
+    updateLastCardForSameSubtitle: true,
     audioPaddingStart: true,
     audioPaddingEnd: true,
     maxImageWidth: true,
@@ -286,6 +299,7 @@ const ankiSettingsKeysObject: { [key in keyof AnkiSettings]: boolean } = {
     mediaFragmentTrimStart: true,
     mediaFragmentTrimEnd: true,
     mediaFragmentMaxClipLength: true,
+    trimBlackBars: true,
     surroundingSubtitlesCountRadius: true,
     surroundingSubtitlesTimeRadius: true,
     ankiFieldSettings: true,
@@ -333,6 +347,7 @@ const subtitleSettingsKeysObject: { [key in keyof SubtitleSettings]: boolean } =
     subtitleAlignment: true,
     subtitleTracksV2: true,
     subtitlesWidth: true,
+    subtitlesWidthUnit: true,
 };
 
 export const subtitleSettingsKeys: (keyof SubtitleSettings)[] = Object.keys(
@@ -364,6 +379,22 @@ export interface TextSubtitleSettings {
     readonly subtitleAlignment: SubtitleAlignment;
 }
 
+export type SubtitlesWidthUnit = '%' | 'px';
+
+export const subtitlesWidthUnits: readonly SubtitlesWidthUnit[] = ['%', 'px'];
+
+export const maxSubtitlesWidth = (unit: SubtitlesWidthUnit): number => (unit === '%' ? 100 : 10000);
+
+export const subtitlesWidthCssValue = (
+    settings: Pick<SubtitleSettings, 'subtitlesWidth' | 'subtitlesWidthUnit'>
+): string | undefined => {
+    if (settings.subtitlesWidth === -1) {
+        return undefined;
+    }
+
+    return `${settings.subtitlesWidth}${settings.subtitlesWidthUnit}`;
+};
+
 export interface SubtitleSettings extends TextSubtitleSettings {
     readonly imageBasedSubtitleScaleFactor: number;
     readonly subtitlePositionOffset: number;
@@ -374,13 +405,12 @@ export interface SubtitleSettings extends TextSubtitleSettings {
     // Track 0 continues to be configured from the top-level settings object.
     readonly subtitleTracksV2: TextSubtitleSettings[];
 
-    // Percentage of containing video width; -1 means 'auto'
+    // Expressed in subtitlesWidthUnit; -1 means 'auto'
     readonly subtitlesWidth: number;
+    readonly subtitlesWidthUnit: SubtitlesWidthUnit;
 }
 
-const textSubtitleSettingsComparators: {
-    [K in keyof TextSubtitleSettings]: (a: TextSubtitleSettings[K], b: TextSubtitleSettings[K]) => boolean;
-} = {
+const textSubtitleSettingsComparators: FieldComparators<TextSubtitleSettings> = {
     subtitleColor: (a, b) => a === b,
     subtitleSize: (a, b) => a === b,
     subtitleThickness: (a, b) => a === b,
@@ -397,38 +427,21 @@ const textSubtitleSettingsComparators: {
     subtitleAlignment: (a, b) => a === b,
 };
 
-const subtitleSettingsComparators: {
-    [K in keyof SubtitleSettings]: (a: SubtitleSettings[K], b: SubtitleSettings[K]) => boolean;
-} = {
+const subtitleSettingsComparators: FieldComparators<SubtitleSettings> = {
     ...textSubtitleSettingsComparators,
     imageBasedSubtitleScaleFactor: (a, b) => a === b,
     subtitlePositionOffset: (a, b) => a === b,
     topSubtitlePositionOffset: (a, b) => a === b,
     subtitleTracksV2: (a, b) => arrayEquals(a, b, areTextSubtitleSettingsEqual),
     subtitlesWidth: (a, b) => a === b,
+    subtitlesWidthUnit: (a, b) => a === b,
 };
 
 function areTextSubtitleSettingsEqual(
     left: TextSubtitleSettings | undefined,
     right: TextSubtitleSettings | undefined
 ): boolean {
-    if (left === right) return true;
-    if (!left || !right) return false;
-
-    for (const key of Object.keys(textSubtitleSettingsComparators) as (keyof TextSubtitleSettings)[]) {
-        if (!compareTextSubtitleSettingsField(key, left, right)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-function compareTextSubtitleSettingsField<K extends keyof TextSubtitleSettings>(
-    key: K,
-    left: TextSubtitleSettings,
-    right: TextSubtitleSettings
-): boolean {
-    return textSubtitleSettingsComparators[key](left[key], right[key]);
+    return fieldsEqual(left, right, textSubtitleSettingsComparators);
 }
 
 export function compareSubtitleSettingsField<K extends keyof SubtitleSettings>(
@@ -436,19 +449,11 @@ export function compareSubtitleSettingsField<K extends keyof SubtitleSettings>(
     a: SubtitleSettings,
     b: SubtitleSettings
 ): boolean {
-    return subtitleSettingsComparators[key](a[key], b[key]);
+    return compareField(key, a, b, subtitleSettingsComparators);
 }
 
 export function areSubtitleSettingsEqual(left: SubtitleSettings | undefined, right: SubtitleSettings | undefined) {
-    if (left === right) return true;
-    if (!left || !right) return false;
-
-    for (const key in subtitleSettingsComparators) {
-        if (!compareSubtitleSettingsField(key as keyof SubtitleSettings, left, right)) {
-            return false;
-        }
-    }
-    return true;
+    return fieldsEqual(left, right, subtitleSettingsComparators);
 }
 
 export interface KeyBind {
@@ -456,6 +461,19 @@ export interface KeyBind {
 }
 
 export interface KeyBindSet {
+    readonly cycleRecipesForward: KeyBind;
+    readonly cycleRecipesBackward: KeyBind;
+    readonly toggleRecipe1: KeyBind;
+    readonly toggleRecipe2: KeyBind;
+    readonly toggleRecipe3: KeyBind;
+    readonly toggleRecipe4: KeyBind;
+    readonly toggleRecipe5: KeyBind;
+    readonly toggleRecipe6: KeyBind;
+    readonly toggleRecipe7: KeyBind;
+    readonly toggleRecipe8: KeyBind;
+    readonly toggleRecipe9: KeyBind;
+    readonly toggleRecipe10: KeyBind;
+
     readonly togglePlay: KeyBind;
     readonly toggleAutoPause: KeyBind;
     readonly toggleCondensedPlayback: KeyBind;
@@ -597,7 +615,15 @@ export interface PageSettings {
     urplay: Page;
     archive: Page;
     crunchyroll: Page;
+    rutube: Page;
+    okru: Page;
+    vkvideo: Page;
+    dreaming: Page;
 }
+
+// The extension captures animated images from the tab, which the website can't, so it has its own setting
+// instead of sharing mediaFragmentFormat
+export type StreamingMediaFragmentFormatSetting = 'jpeg' | 'webp';
 
 export interface StreamingVideoSettings {
     readonly streamingAppUrl: string;
@@ -613,6 +639,9 @@ export interface StreamingVideoSettings {
     // Used to auto-selecting a language in subtitle track selector, if it's available
     readonly streamingLastLanguagesSynced: { [key: string]: string[] };
     readonly streamingScreenshotDelay: number;
+    readonly streamingMediaFragmentFormat: StreamingMediaFragmentFormatSetting;
+    readonly streamingAnimatedImageFps: number;
+    readonly streamingAnimatedImageQuality: number;
     readonly streamingSubtitleListPreference: SubtitleListPreference;
     readonly streamingEnableOverlay: boolean;
     readonly streamingPages: PageSettings;

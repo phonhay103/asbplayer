@@ -1,3 +1,4 @@
+import project from '@project/common/project';
 import Link from '@mui/material/Link';
 import Typography from '@mui/material/Typography';
 import { Trans, useTranslation } from 'react-i18next';
@@ -6,6 +7,7 @@ import CssBaseline from '@mui/material/CssBaseline';
 import Paper from '@mui/material/Paper';
 import { useI18n } from '@project/extension/src/ui/hooks/use-i18n';
 import { createTheme } from '@project/common/theme';
+import { asbError } from '@project/common/util/log';
 import { makeStyles } from '@mui/styles';
 import CenteredGridContainer from '@project/extension/src/ui/components/CenteredGridContainer';
 import CenteredGridItem from '@project/extension/src/ui/components/CenteredGridItem';
@@ -50,7 +52,7 @@ const WelcomeMessage: React.FC<{ className: string }> = ({ className }) => {
                                 color="primary"
                                 target="_blank"
                                 rel="noreferrer"
-                                href={'https://docs.asbplayer.dev/docs/intro/'}
+                                href={`${project.urls.docs}/docs/intro/`}
                             >
                                 readme
                             </Link>,
@@ -93,7 +95,10 @@ const FtueUi = () => {
     };
 
     useEffect(() => {
-        void settingsProvider.getSingle('themeType').then(setThemeType);
+        void settingsProvider
+            .getSingle('themeType')
+            .then(setThemeType)
+            .catch((error) => asbError('ftue', 'Failed to load the theme setting:', error));
     }, []);
 
     if (!i18Initialized) {

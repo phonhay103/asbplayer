@@ -1,9 +1,12 @@
-import { asbError } from '@project/common/util';
+import { asbError, configureLogProvider, LogProvider } from '@project/common/util/log';
+import { SessionLogStorage } from '@/services/session-log-storage';
+import { handleLogMessage } from '@/services/log-message-handler';
 import type { Asbplayer } from '@/services/tab-registry';
 import TabRegistry from '@/services/tab-registry';
 import ImageCapturer from '@/services/image-capturer';
 import VideoHeartbeatHandler from '@/handlers/video/video-heartbeat-handler';
 import RecordMediaHandler from '@/handlers/video/record-media-handler';
+import PrepareAnimatedWebpRecordingHandler from '@/handlers/video/prepare-animated-webp-recording-handler';
 import RerecordMediaHandler from '@/handlers/video/rerecord-media-handler';
 import StartRecordingMediaHandler from '@/handlers/video/start-recording-media-handler';
 import StopRecordingMediaHandler from '@/handlers/video/stop-recording-media-handler';
@@ -81,6 +84,14 @@ import StatisticsOverlayForwarderHandler from '@/handlers/statistics-overlay/sta
 import OpenStatisticsOverlayHandler from '@/handlers/open-statistics-overlay-handler';
 
 export default defineBackground(() => {
+    const logStore = new SessionLogStorage();
+    const logProvider = new LogProvider(logStore);
+    void configureLogProvider(logProvider);
+
+    browser.runtime.onMessage.addListener((request, _sender, sendResponse) =>
+        handleLogMessage(request, sendResponse, logStore, logProvider)
+    );
+
     if (!isFirefoxBuild) {
         void browser.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
     }
@@ -105,11 +116,14 @@ export default defineBackground(() => {
         });
     };
 
-    void globalStateProvider.get(['ftueAnnotation']).then((s) => {
-        if (s.ftueAnnotation === AnnotationTutorialState.shouldSee) {
-            updateBadgeForAnnotationTutorial();
-        }
-    });
+    void globalStateProvider
+        .get(['ftueAnnotation'])
+        .then((s) => {
+            if (s.ftueAnnotation === AnnotationTutorialState.shouldSee) {
+                updateBadgeForAnnotationTutorial();
+            }
+        })
+        .catch((error) => asbError('background', 'Failed to load annotation tutorial state:', error));
 
     const installListener = async (details: Browser.runtime.InstalledDetails) => {
         if (details.reason === browser.runtime.OnInstalledReason.UPDATE) {
@@ -167,7 +181,7 @@ export default defineBackground(() => {
     const tabRegistry = new TabRegistry(settings);
     const audioRecorder = new AudioRecorderService(
         tabRegistry,
-        isFirefoxBuild ? new CaptureStreamAudioRecorder() : new OffscreenAudioRecorder()
+        isFirefoxBuild ? new CaptureStreamAudioRecorder() : new OffscreenAudioRecorder(settings)
     );
     const imageCapturer = new ImageCapturer(settings);
     const cardPublisher = new CardPublisher(settings);
@@ -176,6 +190,7 @@ export default defineBackground(() => {
     const handlers: CommandHandler[] = [
         new VideoHeartbeatHandler(tabRegistry),
         new RecordMediaHandler(audioRecorder, imageCapturer, cardPublisher, settings),
+        new PrepareAnimatedWebpRecordingHandler(settings),
         new RerecordMediaHandler(settings, audioRecorder, cardPublisher),
         new StartRecordingMediaHandler(audioRecorder, imageCapturer, cardPublisher, settings),
         new StopRecordingMediaHandler(audioRecorder, imageCapturer, cardPublisher, settings),
@@ -474,13 +489,16 @@ export default defineBackground(() => {
     }
 
     const updateWebSocketClientState = () => {
-        void settings.getSingle('webSocketClientEnabled').then((webSocketClientEnabled) => {
-            if (webSocketClientEnabled) {
-                void bindWebSocketClient(settings, tabRegistry);
-            } else {
-                unbindWebSocketClient();
-            }
-        });
+        void settings
+            .getSingle('webSocketClientEnabled')
+            .then(async (webSocketClientEnabled) => {
+                if (webSocketClientEnabled) {
+                    await bindWebSocketClient(settings, tabRegistry);
+                } else {
+                    unbindWebSocketClient();
+                }
+            })
+            .catch((error) => asbError('background', 'Failed to update WebSocket client state:', error));
     };
 
     updateWebSocketClientState();

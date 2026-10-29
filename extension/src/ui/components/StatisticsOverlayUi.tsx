@@ -1,3 +1,4 @@
+import project from '@project/common/project';
 import { ExtensionDictionaryStorage } from '@/services/extension-dictionary-storage';
 import { ExtensionSettingsStorage } from '@/services/extension-settings-storage';
 import type { ExtensionMessage } from '@project/common/app';
@@ -5,6 +6,7 @@ import { useChromeExtension } from '@project/common/app/hooks/use-chrome-extensi
 import { DictionaryProvider } from '@project/common/dictionary-db';
 import type { AsbplayerSettings } from '@project/common/settings';
 import { SettingsProvider } from '@project/common/settings';
+import { asbError } from '@project/common/util/log';
 import { createTheme } from '@project/common/theme';
 import { useI18n } from '@project/extension/src/ui/hooks/use-i18n';
 import ThemeProvider from '@mui/material/styles/ThemeProvider';
@@ -44,13 +46,19 @@ const StatisticsOverlayUi = () => {
     mediaIdRef.current = mediaId;
 
     useEffect(() => {
-        void settingsProvider.getAll().then(setSettings);
+        void settingsProvider
+            .getAll()
+            .then(setSettings)
+            .catch((error) => asbError('settings', 'Failed to load extension settings:', error));
     }, []);
 
     useEffect(() => {
         return extension.subscribe((message: ExtensionMessage) => {
             if (message.data.command === 'settings-updated') {
-                void settingsProvider.getAll().then(setSettings);
+                void settingsProvider
+                    .getAll()
+                    .then(setSettings)
+                    .catch((error) => asbError('settings', 'Failed to load extension settings:', error));
             }
         });
     }, [extension]);
@@ -181,7 +189,7 @@ const StatisticsOverlayUi = () => {
         void browser.runtime.sendMessage(command);
     }, []);
 
-    const { initialized: i18nInitialized } = useI18n({ language: settings?.language ?? 'en' });
+    const { initialized: i18nInitialized } = useI18n({ language: settings?.language ?? project.defaultLanguage });
 
     if (!settings || theme === undefined || !i18nInitialized) {
         return null;

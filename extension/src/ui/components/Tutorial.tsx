@@ -1,3 +1,4 @@
+import project from '@project/common/project';
 import { useTheme } from '@mui/material/styles';
 import Box from '@mui/material/Box';
 import Paper from '@mui/material/Paper';
@@ -18,6 +19,7 @@ import Link from '@mui/material/Link';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import type { AsbPlayerToVideoCommandV2, RequestSubtitlesMessage } from '@project/common';
 import TutorialBubble from '@project/common/components/TutorialBubble';
+import { asbError } from '@project/common/util/log';
 import { isFirefox } from '@project/common/browser-detection';
 
 const settingsProvider = new SettingsProvider(new ExtensionSettingsStorage());
@@ -207,7 +209,7 @@ const FinishedDialog: React.FC<{ open: boolean; onClose: () => void }> = ({ open
                             Settings
                         </Link>,
                         <p key={1} />,
-                        <Link href="https://docs.asbplayer.dev/docs/intro/" target="_blank" rel="noreferrer" key={2}>
+                        <Link href={`${project.urls.docs}/docs/intro/`} target="_blank" rel="noreferrer" key={2}>
                             user guide
                         </Link>,
                     ]}
@@ -238,13 +240,16 @@ const Tutorial: React.FC<{ className: string; show: boolean }> = ({ className, s
 
     useEffect(() => {
         if (step == Step.overlay) {
-            void settingsProvider.getSingle('streamingEnableOverlay').then((overlayEnabled) => {
-                if (overlayEnabled) {
-                    videoRef.current?.pause();
-                } else {
-                    setStep(Step.almostDone);
-                }
-            });
+            void settingsProvider
+                .getSingle('streamingEnableOverlay')
+                .then((overlayEnabled) => {
+                    if (overlayEnabled) {
+                        videoRef.current?.pause();
+                    } else {
+                        setStep(Step.almostDone);
+                    }
+                })
+                .catch((error) => asbError('tutorial', 'Failed to load overlay settings:', error));
         }
     }, [step]);
 

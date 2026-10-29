@@ -1,6 +1,9 @@
+import PlaybackEngine, {
+    formatRecipeNotification,
+    formatRecipeSettingLockedNotification,
+} from '@project/common/playback/playback-engine';
 import {
     adjacentSubtitle,
-    asbError,
     buildSubtitleTracks,
     clampMediaTimestamp,
     errorMessageFromVideo,
@@ -11,6 +14,27 @@ import {
     surroundingSubtitlesAroundInterval,
     timeDurationDisplay,
 } from '@project/common/util';
+import {
+    formatPlaybackModeNotifications,
+    playbackModeNotificationJoin,
+} from '@project/common/playback/controllers/playback-mode-controller';
+import type {
+    PlaybackModeNotificationFormatOptions,
+    PlayModeTransition,
+} from '@project/common/playback/controllers/playback-mode-controller';
+import type { SubtitleOffsetOptions } from '@project/common/playback/playback-engine';
+
+import type { RecipeShortcut } from '@project/common/key-binder/key-binder';
+
+import { asbError, asbTrace, asbWarn } from '@project/common/util/log';
+import {
+    cropAndResize,
+    PostMineAction,
+    PostMinePlayback,
+    StartRecordingErrorCode,
+    StopRecordingErrorCode,
+    VideoDataUiOpenReason,
+} from '@project/common';
 import type {
     AckMessage,
     AnkiUiSavedState,
@@ -29,6 +53,8 @@ import type {
     NotifyErrorMessage,
     OffsetToVideoMessage,
     PauseFromVideoMessage,
+    PrepareAnimatedWebpRecordingMessage,
+    PrepareAnimatedWebpRecordingResponse,
     PlaybackState,
     PlaybackStateFromVideoMessage,
     PlaybackRateFromVideoMessage,
@@ -65,32 +91,22 @@ import type {
     DictionaryBuildAnkiCacheStateMessage,
     DictionaryBuildWaniKaniCacheStateMessage,
 } from '@project/common';
+
 import {
-    cropAndResize,
-    PostMineAction,
-    PostMinePlayback,
-    StartRecordingErrorCode,
-    StopRecordingErrorCode,
-    VideoDataUiOpenReason,
-} from '@project/common';
-import type { SeekableTracks } from '@project/common/settings';
-import {
+    effectiveSettings,
+    recipeIdForShortcut,
     calculateSeekableTracksValue,
     extractAnkiSettings,
     PauseOnHoverMode,
     SettingsProvider,
     SubtitleListPreference,
+    SubtitleVisibility,
     isSaveOnlySettings,
 } from '@project/common/settings';
+import type { AsbplayerSettings, SeekableTracks, StreamingMediaFragmentFormatSetting } from '@project/common/settings';
+
 import { SubtitleReader } from '@project/common/subtitle-reader';
-import {
-    formatPlaybackModeNotifications,
-    playbackModeNotificationJoin,
-} from '@project/common/playback/controllers/playback-mode-controller';
-import type {
-    PlaybackModeNotificationFormatOptions,
-    PlayModeTransition,
-} from '@project/common/playback/controllers/playback-mode-controller';
+
 import AnkiUiController from '@project/extension/src/controllers/anki-ui-controller';
 import ControlsController from '@project/extension/src/controllers/controls-controller';
 import DragController from '@project/extension/src/controllers/drag-controller';
@@ -115,11 +131,11 @@ import { ExtensionDictionaryStorage } from '@project/extension/src/services/exte
 import { HoveredToken } from '@project/common/annotations';
 import { v4 as uuidv4 } from 'uuid';
 import { debounced } from '@project/extension/src/services/debounced';
-import PlaybackEngine from '@project/common/playback/playback-engine';
-import type { SubtitleOffsetOptions } from '@project/common/playback/playback-engine';
+
 import VideoFrameTimingDriver from '@project/common/playback/timing/video-frame-timing-driver';
 import InterpolatedContentClock from '@project/extension/src/services/interpolated-content-clock';
 import { mediaSourceIdentity } from '@project/extension/src/pages/util';
+import { isFirefoxBuild } from '@project/extension/src/services/build-flags';
 
 let netflix = false;
 document.addEventListener('asbplayer-netflix-enabled', (e) => {
@@ -173,6 +189,22 @@ export interface BindingOptions {
     readonly videoSrcChangesIndicateNewVideo: boolean;
 }
 
+const subtitleParsingSettingsKeys = [
+    'subtitleRegexFilter',
+    'subtitleRegexFilterTextReplacement',
+    'subtitleHtml',
+    'convertNetflixRuby',
+] as const;
+
+type SubtitleParsingSettings = Pick<AsbplayerSettings, (typeof subtitleParsingSettingsKeys)[number]>;
+
+interface SubtitleSource {
+    readonly files: File[];
+    readonly flatten: boolean;
+    settings: SubtitleParsingSettings;
+    offset: number;
+}
+
 export default class Binding {
     private readonly _fallbackVideoSrc = uuidv4();
 
@@ -197,6 +229,10 @@ export default class Binding {
     private pausedDueToHover = false;
     private _seekDurationMs = 3000;
     private _speedChangeStep = 0.1;
+    private _lastProfile?: string;
+    private _subtitleSource?: SubtitleSource;
+    private _subtitleRefreshId = 0;
+    private recipeSelectionQueue: Promise<void> = Promise.resolve();
 
     readonly video: HTMLMediaElement;
     readonly hasPageScript: boolean;
@@ -215,13 +251,16 @@ export default class Binding {
     readonly bulkExportController: BulkExportController;
 
     private copyToClipboardOnMine: boolean;
+    private alwaysUseSubtitleForSentence: boolean;
     private clickToMineDefaultAction: PostMineAction;
     private takeScreenshot: boolean;
     private cleanScreenshot: boolean;
     private audioPaddingStart: number;
     private audioPaddingEnd: number;
+    private mediaFragmentFormat: StreamingMediaFragmentFormatSetting;
     private maxImageWidth: number;
     private maxImageHeight: number;
+    private trimBlackBars = false;
     private imageDelay = 0;
     private pauseOnHoverMode: PauseOnHoverMode = PauseOnHoverMode.disabled;
     private _disablePauseOnHover: boolean;
@@ -277,8 +316,9 @@ export default class Binding {
         this.ankiUiController = new AnkiUiController();
         this.notificationController = new NotificationController(this);
         this.mobileVideoOverlayController = new MobileVideoOverlayController(this, OffsetAnchor.top);
-        this.subtitleController.onOffsetChange = () => {
-            this.playbackEngine.subtitlesChanged(this.subtitleController.subtitles);
+        this.subtitleController.onOffsetChange = (offset) => {
+            if (this._subtitleSource !== undefined) this._subtitleSource.offset = offset;
+            this.subtitlesChanged();
             return this.mobileVideoOverlayController.updateModel();
         };
         this.mobileGestureController = new MobileGestureController(this);
@@ -291,14 +331,24 @@ export default class Binding {
         this.clickToMineDefaultAction = PostMineAction.showAnkiDialog;
         this.audioPaddingStart = 0;
         this.audioPaddingEnd = 500;
+        this.mediaFragmentFormat = 'jpeg';
         this.maxImageWidth = 0;
         this.maxImageHeight = 0;
         this.copyToClipboardOnMine = false;
+        this.alwaysUseSubtitleForSentence = false;
         this.alwaysPlayOnSubtitleRepeat = true;
         this.postMinePlayback = PostMinePlayback.remember;
         this._synced = false;
         this.recordingMediaWithScreenshot = false;
         this.frameId = options.frameId;
+
+        asbTrace('playback/binding', 'Created media binding', {
+            hasPageScript: this.hasPageScript,
+            hasFrameId: this.frameId !== undefined,
+            videoSrcChangesIndicateNewVideo: this._videoSrcChangesIndicateNewVideo,
+            hasVideoSrc: video.src.length > 0,
+            readyState: video.readyState,
+        });
     }
 
     get registeredVideoSrc() {
@@ -314,6 +364,12 @@ export default class Binding {
     }
 
     set recordingState(recordingState: RecordingState) {
+        if (this._recordingState !== recordingState) {
+            asbTrace('playback/binding', 'Recording state changed', {
+                previousState: this._recordingState,
+                state: recordingState,
+            });
+        }
         this._recordingState = recordingState;
         this.playbackEngine.playbackModesSuppressedChanged(this.recordingMedia);
     }
@@ -348,8 +404,40 @@ export default class Binding {
         };
     }
 
+    selectRecipe(action: RecipeShortcut): Promise<void> {
+        const selection = this.recipeSelectionQueue.then(() => this._selectRecipe(action));
+        this.recipeSelectionQueue = selection.catch(() => undefined);
+        return selection;
+    }
+
+    private async _selectRecipe(action: RecipeShortcut): Promise<void> {
+        const settings = await this.settings.getAll();
+        const activeRecipeId = recipeIdForShortcut(settings, action);
+        if (activeRecipeId === undefined) return;
+        await this.settings.set({ activeRecipeId });
+        const command: VideoToExtensionCommand<SettingsUpdatedMessage> = {
+            sender: 'asbplayer-video',
+            src: this._registeredVideoSrc,
+            message: { command: 'settings-updated' },
+        };
+        try {
+            await browser.runtime.sendMessage(command);
+        } finally {
+            await this._refreshSettings();
+        }
+        asbTrace('playback/recipe', 'Recipe shortcut applied', {
+            action,
+            previousRecipeId: settings.activeRecipeId,
+            activeRecipeId,
+        });
+    }
+
     togglePlayMode(targetMode: PlayMode) {
         this.playbackEngine.togglePlaybackMode(targetMode);
+    }
+
+    subtitlesChanged(options?: { readonly timingChanged?: boolean }): void {
+        this.playbackEngine.subtitlesChanged(this.subtitleController.subtitles, options);
     }
 
     adjustPlaybackRate(delta: number): void {
@@ -411,6 +499,7 @@ export default class Binding {
         return {
             maxWidth: this.maxImageWidth,
             maxHeight: this.maxImageHeight,
+            trimBlackBars: this.trimBlackBars,
             rect: {
                 left: rect.left,
                 top: rect.top,
@@ -428,6 +517,13 @@ export default class Binding {
     private _createPlaybackEngine(): PlaybackEngine<IndexedSubtitleModel> {
         const video = this.video as HTMLVideoElement;
         const subtitles = this.subtitleController.subtitles;
+        asbTrace('playback/binding', 'Creating media playback owner', {
+            subtitleCount: subtitles.length,
+            appIntegration: true,
+            externalSeekEvents: disneyPlus,
+            netflix,
+            disneyPlus,
+        });
         return new PlaybackEngine({
             settingsProvider: this.settings,
             appIntegration: true,
@@ -496,6 +592,13 @@ export default class Binding {
                 }
             ),
             callbacks: {
+                selectToken: (target, options) =>
+                    this.subtitleController.selectToken(target, {
+                        ...options,
+                        autoPause: true,
+                        scrollIntoView: false,
+                    }),
+                clearAutoPauseTokenSelection: () => this.subtitleController.clearAutoPauseTokenSelection(),
                 pause: () => this.pause(),
                 play: async () => {
                     await this.play();
@@ -508,6 +611,7 @@ export default class Binding {
                 },
                 setSubtitleOffset: (offset, options) => this.subtitleController.offset(offset, !options.notifyPlayer),
                 playbackStateChanged: (state) => {
+                    this.subtitleController.setPlaybackPaused(state.paused);
                     this.subtitleController.playbackStateChanged(state);
                     this._notifyPlaybackState(state);
                 },
@@ -541,11 +645,27 @@ export default class Binding {
                         })
                         .catch((error) => asbError('video/binding', error));
                 },
+                settingChangeBlocked: (settingLocKey) =>
+                    this.subtitleController.notification({
+                        text: formatRecipeSettingLockedNotification(settingLocKey).text(i18n.t),
+                    }),
+                recipeChanged: (name, transition) => {
+                    this._handlePlaybackModesChanged(transition);
+                    if (!this.synced || this.subtitleController.subtitles.length === 0) return;
+                    this.subtitleController.notification({
+                        text: formatRecipeNotification(name).text(i18n.t),
+                    });
+                },
                 playbackModesChanged: (transition) => {
                     const notification = this._handlePlaybackModesChanged(transition);
                     if (notification) this.subtitleController.notification({ text: notification });
                 },
                 initialPlaybackSettingsChanged: (settings) => {
+                    asbTrace('playback/binding', 'Applying initial playback settings to media owner', {
+                        subtitleOffset: settings.subtitleOffset,
+                        playbackRate: settings.playbackRate,
+                        playbackModes: [...settings.playbackModeTransition.modes],
+                    });
                     this._notifySubtitleOffset(settings.subtitleOffset);
                     const notifications = settings.notifications.offsetAndRate.map((notification) =>
                         notification.type === 'message'
@@ -556,6 +676,9 @@ export default class Binding {
                         includeTransition: false,
                     });
                     if (playbackMode) notifications.push(playbackMode);
+                    if (settings.recipeName !== null) {
+                        notifications.push(formatRecipeNotification(settings.recipeName).text(i18n.t));
+                    }
                     if (notifications.length) {
                         this.subtitleController.notification({
                             text: notifications.join(playbackModeNotificationJoin),
@@ -618,6 +741,10 @@ export default class Binding {
     }
 
     bind() {
+        asbTrace('playback/binding', 'Binding media owner', {
+            readyState: this.video.readyState,
+            hasVideoSrc: this.video.src.length > 0,
+        });
         let bound = false;
 
         if (this.video.readyState === 4) {
@@ -625,6 +752,7 @@ export default class Binding {
             bound = true;
         } else {
             this.canPlayListener = () => {
+                asbTrace('playback/binding', 'Media became playable', { readyState: this.video.readyState });
                 if (!bound) {
                     this._bind();
                     bound = true;
@@ -646,11 +774,20 @@ export default class Binding {
     }
 
     private _bind() {
+        asbTrace('playback/binding', 'Starting media-owner bind');
         this._notifyReady();
         this._subscribe();
-        void this._refreshSettings().then(() => {
-            void this.videoDataSyncController.requestSubtitles({ kind: 'reload', videoChanged: false });
-        });
+        void this._refreshSettings()
+            .then(() => {
+                void this.videoDataSyncController
+                    .requestSubtitles({ kind: 'reload', videoChanged: false })
+                    .catch((error) => {
+                        asbError('video/binding', 'Failed to request subtitles while binding video:', error);
+                    });
+            })
+            .catch((error) => {
+                asbError('video/binding', 'Failed to refresh settings while binding video:', error);
+            });
         this.subtitleController.bind();
         this.playbackEngine.bind();
         this.dragController.bind(this);
@@ -672,9 +809,17 @@ export default class Binding {
 
         this.mobileGestureController.onSwipeLeft = () => seek(false);
         this.mobileGestureController.onSwipeRight = () => seek(true);
+        asbTrace('playback/binding', 'Media-owner bind finished');
     }
 
     _notifyReady() {
+        asbTrace('playback/binding', 'Sending media-ready state', {
+            durationMs: this.video.duration * 1000,
+            currentTimeMs: this.currentTimeMs,
+            paused: this.video.paused,
+            playbackRate: this.video.playbackRate,
+            readyState: this.video.readyState,
+        });
         const command: VideoToExtensionCommand<ReadyFromVideoMessage> = {
             sender: 'asbplayer-video',
             message: {
@@ -730,6 +875,10 @@ export default class Binding {
                 const detail = (e as CustomEvent<DisneyPlaybackEventDetail>).detail;
                 if (detail === undefined || !Number.isFinite(detail.timestampMs)) return;
                 this.disneyPlusTimeListener?.(new CustomEvent('asbplayer-disney-plus-time', { detail }));
+                asbTrace('playback/binding', 'Observed Disney+ seek start', {
+                    timestampMs: detail.timestampMs,
+                    hasRequestId: detail.requestId !== undefined,
+                });
                 this.playbackEngine.seekStarted();
             };
             document.addEventListener('asbplayer-disney-plus-seek-started', this.disneyPlusSeekStartedListener);
@@ -738,6 +887,10 @@ export default class Binding {
                 const detail = (e as CustomEvent<DisneyPlaybackEventDetail>).detail;
                 if (detail === undefined || !Number.isFinite(detail.timestampMs)) return;
                 this.disneyPlusTimeListener?.(new CustomEvent('asbplayer-disney-plus-time', { detail }));
+                asbTrace('playback/binding', 'Observed Disney+ seek completion', {
+                    timestampMs: detail.timestampMs,
+                    hasRequestId: detail.requestId !== undefined,
+                });
                 this.playbackEngine.seeked(detail.timestampMs);
                 if (detail.requestId !== undefined) {
                     const pending = this.disneyPlusPendingSeeks.get(detail.requestId);
@@ -754,6 +907,7 @@ export default class Binding {
                 const requestId = (e as CustomEvent<string>).detail;
                 const pending = this.disneyPlusPendingSeeks.get(requestId);
                 if (pending === undefined) return;
+                asbTrace('playback/binding', 'Cancelled pending Disney+ seek', { hasRequestId: true });
                 this.playbackEngine.seekCanceled();
                 this.disneyPlusPendingSeeks.delete(requestId);
                 pending.resolve();
@@ -762,7 +916,10 @@ export default class Binding {
         }
 
         if (netflix) {
-            this.netflixSeekCancelledListener = () => this.playbackEngine.seekCanceled();
+            this.netflixSeekCancelledListener = () => {
+                asbTrace('playback/binding', 'Observed Netflix seek cancellation');
+                this.playbackEngine.seekCanceled();
+            };
             document.addEventListener('asbplayer-netflix-seek-cancelled', this.netflixSeekCancelledListener);
         }
 
@@ -811,6 +968,13 @@ export default class Binding {
                 const videoSrc = this.video.src || this._fallbackVideoSrc;
                 this._updateRegisteredVideoSrc(videoSrc);
                 const sameLocationVideoChanged = this._videoSrcChangesIndicateNewVideo && sourceChanged;
+
+                asbTrace('playback/binding', 'Observed media metadata load', {
+                    sourceChanged,
+                    sameLocationVideoChanged,
+                    pickerVisible: this.videoDataSyncController.pickerVisible,
+                    alreadySynced: this._synced,
+                });
 
                 // Player events (e.g. Hulu blob URL rotation) can fire loadedmetadata
                 // without an actual video change. Skip refresh when the picker is open
@@ -887,6 +1051,7 @@ export default class Binding {
                         // ignore
                         break;
                     case 'subtitles': {
+                        this._subtitleSource = undefined;
                         const subtitlesMessage = request.message as SubtitlesToVideoMessage;
                         const subtitles: SubtitleModel[] = subtitlesMessage.value;
                         this._updateSubtitles(
@@ -927,7 +1092,7 @@ export default class Binding {
                     }
                     case 'playbackRate': {
                         const playbackRateMessage = request.message as PlaybackRateToVideoMessage;
-                        this.playbackEngine.playbackRateChanged(playbackRateMessage.value);
+                        this.playbackEngine.playbackRateChanged(playbackRateMessage.value, { notifyBlocked: true });
                         break;
                     }
                     case 'playMode': {
@@ -1261,10 +1426,16 @@ export default class Binding {
     }
 
     async _refreshSettings() {
+        const subtitleRefreshId = ++this._subtitleRefreshId;
+        const subtitleSource = this._subtitleSource;
+        asbTrace('playback/binding', 'Refreshing media-owner settings');
         const activeProfile = (await this.settings.activeProfile())?.name;
+        const profileChanged = this._lastProfile !== activeProfile;
+        this._lastProfile = activeProfile;
         this.playbackEngine.profileChanged(activeProfile);
-        const currentSettings = await this.settings.getAll();
-        this.playbackEngine.settingsChanged(currentSettings);
+        const underlyingSettings = await this.settings.getAll();
+        const currentSettings = effectiveSettings(underlyingSettings);
+        this.playbackEngine.settingsChanged(underlyingSettings);
         this._seekDurationMs = currentSettings.seekDuration * 1000;
         this._speedChangeStep = currentSettings.speedChangeStep;
         this.seekableTracks = currentSettings.seekableTracks;
@@ -1274,21 +1445,27 @@ export default class Binding {
         this.imageDelay = currentSettings.streamingScreenshotDelay;
         this.audioPaddingStart = currentSettings.audioPaddingStart;
         this.audioPaddingEnd = currentSettings.audioPaddingEnd;
+        this.mediaFragmentFormat = currentSettings.streamingMediaFragmentFormat;
         this.clickToMineDefaultAction = currentSettings.clickToMineDefaultAction;
         this.maxImageWidth = currentSettings.maxImageWidth;
         this.maxImageHeight = currentSettings.maxImageHeight;
+        this.trimBlackBars = currentSettings.trimBlackBars;
         this.copyToClipboardOnMine = currentSettings.copyToClipboardOnMine;
+        this.alwaysUseSubtitleForSentence = currentSettings.alwaysUseSubtitleForSentence;
         this.alwaysPlayOnSubtitleRepeat = currentSettings.alwaysPlayOnSubtitleRepeat;
         this.pauseOnHoverMode = currentSettings.pauseOnHoverMode;
 
         this.subtitleController.displaySubtitles = currentSettings.streamingDisplaySubtitles;
         this.subtitleController.bottomSubtitlePositionOffset = currentSettings.subtitlePositionOffset;
         this.subtitleController.topSubtitlePositionOffset = currentSettings.topSubtitlePositionOffset;
-        this.subtitleController.subtitlesWidth = currentSettings.subtitlesWidth;
+        this.subtitleController.setSubtitlesWidth(currentSettings.subtitlesWidth, currentSettings.subtitlesWidthUnit);
         this.subtitleController.surroundingSubtitlesCountRadius = currentSettings.surroundingSubtitlesCountRadius;
         this.subtitleController.surroundingSubtitlesTimeRadius = currentSettings.surroundingSubtitlesTimeRadius;
         this.subtitleController.autoCopyCurrentSubtitle = currentSettings.autoCopyCurrentSubtitle;
         this.subtitleController.dictionaryTrackSettings = currentSettings.dictionaryTracks;
+        this.subtitleController.setAdaptiveWordVisibilityEnabled(
+            currentSettings.subtitleVisibility === SubtitleVisibility.whenDue
+        );
         this.subtitleController.autoCopyableTracks = currentSettings.autoCopyableTracks;
 
         const convertNetflixRubyChanged =
@@ -1298,7 +1475,11 @@ export default class Binding {
         const subtitleHtmlChanged = this.subtitleController.subtitleHtml !== currentSettings.subtitleHtml;
         this.subtitleController.subtitleHtml = currentSettings.subtitleHtml;
 
-        this.subtitleController.subtitleAnnotations.settingsUpdated(currentSettings);
+        if (profileChanged) {
+            this.subtitleController.subtitleAnnotations.profileChanged(currentSettings);
+        } else {
+            this.subtitleController.subtitleAnnotations.settingsUpdated(currentSettings, { force: false });
+        }
         this.subtitleController.setSubtitleSettings(currentSettings);
 
         if (convertNetflixRubyChanged || subtitleHtmlChanged) {
@@ -1332,10 +1513,46 @@ export default class Binding {
             void this.mobileVideoOverlayController.updateModel();
         }
 
+        if (
+            subtitleSource !== undefined &&
+            subtitleSource === this._subtitleSource &&
+            subtitleRefreshId === this._subtitleRefreshId &&
+            subtitleParsingSettingsKeys.some((key) => subtitleSource.settings[key] !== currentSettings[key])
+        ) {
+            asbTrace('playback/binding', 'Refreshing subtitles after parsing settings changed', {
+                changedSettings: subtitleParsingSettingsKeys.filter(
+                    (key) => subtitleSource.settings[key] !== currentSettings[key]
+                ),
+            });
+            subtitleSource.settings = {
+                ...subtitleSource.settings,
+                subtitleRegexFilter: currentSettings.subtitleRegexFilter,
+                subtitleRegexFilterTextReplacement: currentSettings.subtitleRegexFilterTextReplacement,
+                subtitleHtml: currentSettings.subtitleHtml,
+                convertNetflixRuby: currentSettings.convertNetflixRuby,
+            };
+            void this._reloadSubtitles(subtitleSource).catch((error) =>
+                asbError('video/binding', 'Failed to refresh subtitles:', error)
+            );
+        }
+
         await i18nInit(currentSettings.language);
+        asbTrace('playback/binding', 'Media-owner settings refreshed', {
+            activeProfile,
+            seekDurationMs: this._seekDurationMs,
+            speedChangeStep: this._speedChangeStep,
+            displaySubtitles: currentSettings.streamingDisplaySubtitles,
+            disabledSubtitleTracks: this.subtitleController.disabledSubtitleTracks,
+            pauseOnHoverMode: this.pauseOnHoverMode,
+        });
     }
 
     unbind() {
+        this._subtitleSource = undefined;
+        asbTrace('playback/binding', 'Unbinding media owner', {
+            subscribed: this.subscribed,
+            pendingDisneyPlusSeeks: this.disneyPlusPendingSeeks.size,
+        });
         if (this.canPlayListener) {
             this.video.removeEventListener('canplay', this.canPlayListener);
             this.canPlayListener = undefined;
@@ -1413,6 +1630,7 @@ export default class Binding {
         this._notifyVideoDisappeared(this._registeredVideoSrc);
         this._registeredVideoSrc = '';
         this._lastSyncedLocation = undefined;
+        asbTrace('playback/binding', 'Media-owner unbind finished');
     }
 
     async _takeScreenshot() {
@@ -1472,18 +1690,27 @@ export default class Binding {
             return;
         }
 
+        let animatedWebpArmed = false;
+
         if (this.recordMedia) {
             this.recordingState = RecordingState.requested;
             this.recordingPostMineAction = postMineAction;
             this.wasPlayingBeforeRecordingMedia = !this.video.paused;
             this.recordingMediaStartedTimestamp = this.currentTimeMs;
             this.recordingMediaWithScreenshot = this.takeScreenshot;
+
+            // Negotiate and open the tab-capture stream before seeking, so it's already flowing by the
+            // time playback resumes at the padding-adjusted start (see animated-webp-capture.ts).
+            if (this.takeScreenshot && this.mediaFragmentFormat === 'webp' && !isFirefoxBuild) {
+                animatedWebpArmed = await this._armAnimatedWebpCapture();
+            }
+
             const start = Math.max(0, subtitle.start - this.audioPaddingStart);
             await this.seek(start);
             await this.play();
         }
 
-        if (!text || subtitle.text.includes(text.trim())) {
+        if (this.alwaysUseSubtitleForSentence || !text || subtitle.text.includes(text.trim())) {
             text = extractText(subtitle, surroundingSubtitles);
         }
 
@@ -1511,6 +1738,7 @@ export default class Binding {
                 customFieldValues,
                 isBulkExport,
                 noteId,
+                animatedWebpArmed,
                 ...this._imageCaptureParams,
             },
             src: this._registeredVideoSrc,
@@ -1646,6 +1874,12 @@ export default class Binding {
     async seek(timestampMs: number): Promise<void> {
         const clampedTimestampMs = clampMediaTimestamp(timestampMs, this.video.duration * 1000);
 
+        asbTrace('playback/binding', 'Seeking media owner', {
+            requestedTimestampMs: timestampMs,
+            clampedTimestampMs,
+            route: netflix ? 'netflix' : disneyPlus ? 'disney-plus' : 'video-element',
+        });
+
         if (netflix) {
             document.dispatchEvent(
                 new CustomEvent('asbplayer-netflix-seek', {
@@ -1664,6 +1898,7 @@ export default class Binding {
                     document.dispatchEvent(
                         new CustomEvent('asbplayer-disney-plus-seek-cancelled', { detail: requestId })
                     );
+                    asbTrace('playback/binding', 'Disney+ seek timed out', { clampedTimestampMs });
                     resolve();
                 }, disneyPlusSeekTimeoutMs);
                 this.disneyPlusPendingSeeks.set(requestId, {
@@ -1692,6 +1927,11 @@ export default class Binding {
     }
 
     async play() {
+        asbTrace('playback/binding', 'Requesting media playback', {
+            currentTimeMs: this.currentTimeMs,
+            paused: this.video.paused,
+            route: netflix ? 'netflix' : disneyPlus ? 'disney-plus' : 'video-element',
+        });
         if (netflix) {
             await this._playNetflix();
             return;
@@ -1771,6 +2011,11 @@ export default class Binding {
     }
 
     pause() {
+        asbTrace('playback/binding', 'Requesting media pause', {
+            currentTimeMs: this.currentTimeMs,
+            paused: this.video.paused,
+            route: netflix ? 'netflix' : disneyPlus ? 'disney-plus' : 'video-element',
+        });
         if (netflix) {
             document.dispatchEvent(new CustomEvent('asbplayer-netflix-pause'));
             return;
@@ -1795,10 +2040,12 @@ export default class Binding {
         const rect = this.video.getBoundingClientRect();
         const maxWidth = this.maxImageWidth;
         const maxHeight = this.maxImageHeight;
-        return cropAndResize(maxWidth, maxHeight, rect, tabImageDataUrl);
+        // Thumbnail for identifying the video, not a card image, so bars are left as-is
+        return cropAndResize(maxWidth, maxHeight, rect, tabImageDataUrl, false);
     }
 
     async loadSubtitles(files: File[], flatten: boolean, syncWithAsbplayerId?: string) {
+        this._subtitleSource = undefined;
         const {
             streamingSubtitleListPreference,
             subtitleRegexFilter,
@@ -1837,15 +2084,18 @@ export default class Binding {
 
         switch (streamingSubtitleListPreference) {
             case SubtitleListPreference.noSubtitleList: {
-                const reader = new SubtitleReader({
-                    regexFilter: subtitleRegexFilter,
-                    regexFilterTextReplacement: subtitleRegexFilterTextReplacement,
-                    subtitleHtml: subtitleHtml,
-                    convertNetflixRuby: convertNetflixRuby,
-                    pgsParserWorkerFactory: pgsParserWorkerFactory,
-                });
-                const offset = this.playbackEngine.lastSubtitleOffset;
-                const subtitles = await reader.subtitles(files, flatten);
+                const source: SubtitleSource = {
+                    files: [...files],
+                    flatten,
+                    settings: {
+                        subtitleRegexFilter,
+                        subtitleRegexFilterTextReplacement,
+                        subtitleHtml,
+                        convertNetflixRuby,
+                    },
+                    offset: this.playbackEngine.lastSubtitleOffset,
+                };
+                const subtitles = await this._parseSubtitles(source);
 
                 // Order is important: sync with tab first, then update our subtitle controller
                 // since the subtitle controller may send coloring messages as soon as it gets
@@ -1859,23 +2109,11 @@ export default class Binding {
                 try {
                     await syncWithAsbplayerTab(withSyncedAsbplayerOnly, syncWithAsbplayerId);
                 } catch (error) {
-                    asbError('video/binding', 'Failed to sync with asbplayer tab when loading subtitles:', error);
+                    asbWarn('video/binding', 'Failed to sync with asbplayer tab when loading subtitles:', error);
                 }
 
-                this._updateSubtitles(
-                    subtitles.map((s, index) => ({
-                        start: s.start + offset,
-                        end: s.end + offset,
-                        text: s.text,
-                        textImage: s.textImage,
-                        track: s.track,
-                        index,
-                        originalStart: s.start,
-                        originalEnd: s.end,
-                        tokenization: s.tokenization,
-                    })),
-                    flatten ? [files[0].name] : files.map((f) => f.name)
-                );
+                this._subtitleSource = source;
+                this._updateSubtitles(subtitles, flatten ? [files[0].name] : files.map((f) => f.name));
                 break;
             }
             case SubtitleListPreference.app:
@@ -1884,16 +2122,72 @@ export default class Binding {
         }
     }
 
+    private async _parseSubtitles(source: SubtitleSource) {
+        const settings = source.settings;
+        const reader = new SubtitleReader({
+            regexFilter: settings.subtitleRegexFilter,
+            regexFilterTextReplacement: settings.subtitleRegexFilterTextReplacement,
+            subtitleHtml: settings.subtitleHtml,
+            convertNetflixRuby: settings.convertNetflixRuby,
+            pgsParserWorkerFactory,
+        });
+        const subtitles = await reader.subtitles(source.files, source.flatten);
+        return subtitles.map((subtitle, index) => ({
+            ...subtitle,
+            start: subtitle.start + source.offset,
+            end: subtitle.end + source.offset,
+            originalStart: subtitle.start,
+            originalEnd: subtitle.end,
+            index,
+        }));
+    }
+
+    private async _reloadSubtitles(source: SubtitleSource) {
+        const settings = source.settings;
+        const subtitles = await this._parseSubtitles(source);
+        const sourceChanged = this._subtitleSource !== source;
+        const settingsChanged = source.settings !== settings;
+        if (sourceChanged || settingsChanged) {
+            asbTrace('playback/binding', 'Discarded subtitle refresh', { sourceChanged, settingsChanged });
+            return;
+        }
+        const subtitleFileNames = this.subtitleController.subtitleFileNames ?? [];
+        const nonEmptyTrackIndexes = this._nonEmptyTrackIndexes(subtitles);
+        asbTrace('playback/binding', 'Reloading media-owner subtitles', {
+            subtitleCount: subtitles.length,
+            trackCount: nonEmptyTrackIndexes.length,
+            fileCount: subtitleFileNames.length,
+        });
+        this.subtitleController.subtitles = subtitles;
+        this.subtitleController.cacheHtml();
+        this.subtitleController.refreshCurrentSubtitle = true;
+
+        this.playbackEngine.playbackPositionKeysChanged(
+            this._playbackPositionKeys(nonEmptyTrackIndexes, subtitleFileNames),
+            { isNewSource: false }
+        );
+        this.subtitlesChanged();
+
+        this.ankiUiSavedState = undefined;
+        void this.mobileVideoOverlayController.updateModel();
+    }
+
     private _updateSubtitles(subtitles: IndexedSubtitleModel[], subtitleFileNames: string[]) {
+        asbTrace('playback/binding', 'Updating media-owner subtitles', {
+            subtitleCount: subtitles.length,
+            trackCount: this._nonEmptyTrackIndexes(subtitles).length,
+            fileCount: subtitleFileNames.length,
+        });
         this.subtitleController.subtitles = subtitles;
         this.subtitleController.subtitleFileNames = subtitleFileNames;
         this.subtitleController.cacheHtml();
 
         const nonEmptyTrackIndexes = this._nonEmptyTrackIndexes(subtitles);
         this.playbackEngine.playbackPositionKeysChanged(
-            this._playbackPositionKeys(nonEmptyTrackIndexes, subtitleFileNames)
+            this._playbackPositionKeys(nonEmptyTrackIndexes, subtitleFileNames),
+            { isNewSource: true }
         );
-        this.playbackEngine.subtitlesChanged(this.subtitleController.subtitles);
+        this.subtitlesChanged();
 
         this.subtitleController.showLoadedMessage(nonEmptyTrackIndexes);
         this.ankiUiSavedState = undefined;
@@ -1919,14 +2213,17 @@ export default class Binding {
                             },
                         });
                     }
-                });
+                })
+                .catch((error) => asbError('video/binding', 'Failed to check subtitle display settings:', error));
         }
 
-        void shouldShowUpdateAlert().then((shouldShowUpdateAlert) => {
-            if (shouldShowUpdateAlert) {
-                void this.notificationController.updateAlert(browser.runtime.getManifest().version);
-            }
-        });
+        void shouldShowUpdateAlert()
+            .then(async (shouldShowUpdateAlert) => {
+                if (shouldShowUpdateAlert) {
+                    await this.notificationController.updateAlert(browser.runtime.getManifest().version);
+                }
+            })
+            .catch((error) => asbError('video/binding', 'Failed to show the update alert:', error));
     }
 
     private _playbackPositionKeys(nonEmptyTrackIndexes: number[], subtitleFileNames: string[]): string[] {
@@ -1942,8 +2239,12 @@ export default class Binding {
     }
 
     private _resetSubtitles() {
+        this._subtitleSource = undefined;
+        asbTrace('playback/binding', 'Resetting media-owner subtitles', {
+            previousSubtitleCount: this.subtitleController.subtitles.length,
+        });
         this.subtitleController.reset();
-        this.playbackEngine.playbackPositionKeysChanged([]);
+        this.playbackEngine.playbackPositionKeysChanged([], { isNewSource: true });
         this.playbackEngine.subtitlesChanged([]);
         this.ankiUiSavedState = undefined;
         this._synced = false;
@@ -1954,12 +2255,19 @@ export default class Binding {
 
     private _updateRegisteredVideoSrc(src: string) {
         if (src === this._registeredVideoSrc) return;
+        asbTrace('playback/binding', 'Media source identity changed', {
+            hadPreviousSource: this._registeredVideoSrc.length > 0,
+            hasNextSource: src.length > 0,
+        });
         this._notifyVideoDisappeared(this._registeredVideoSrc);
         this._registeredVideoSrc = src;
     }
 
     private _notifyVideoDisappeared(src: string | undefined) {
         if (src === undefined) return;
+        asbTrace('playback/binding', 'Notifying media source disappearance', {
+            hasSource: src.length > 0,
+        });
         const command: VideoToExtensionCommand<VideoDisappearedMessage> = {
             sender: 'asbplayer-video',
             message: {
@@ -2059,6 +2367,25 @@ export default class Binding {
         }
 
         return this.audioStream.active ? this.audioStream : undefined;
+    }
+
+    // Has the tab-capture stream opened (in the offscreen document) right now, before the mining seek, instead of
+    // leaving that to happen afterward (which is slow enough to clip the start of the clip once the seek jumps back
+    // to the padding-adjusted mining start). Returns whether the capture was armed - the recorder opens one itself
+    // if not.
+    private async _armAnimatedWebpCapture(): Promise<boolean> {
+        try {
+            const prepareCommand: VideoToExtensionCommand<PrepareAnimatedWebpRecordingMessage> = {
+                sender: 'asbplayer-video',
+                message: { command: 'prepare-animated-webp-recording', ...this._imageCaptureParams },
+                src: this._registeredVideoSrc,
+            };
+            const response: PrepareAnimatedWebpRecordingResponse = await browser.runtime.sendMessage(prepareCommand);
+            return response.armed;
+        } catch (e) {
+            asbError('recording/prepare-animated-webp', e);
+            return false;
+        }
     }
 
     private async _sendAudioBase64(base64: string, requestId: string, encodeAsMp3: boolean) {

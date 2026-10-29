@@ -1,4 +1,4 @@
-import { asbError } from '@project/common/util';
+import { asbError } from '@project/common/util/log';
 import { bufferToBase64 } from '@project/common/base64';
 
 export class TimedRecordingInProgressError extends Error {}
@@ -11,6 +11,10 @@ export default class AudioRecorder {
     private blobPromise: Promise<Blob> | null;
     private timeoutId?: ReturnType<typeof setTimeout>;
     private timeoutResolve?: (base64: string) => void;
+
+    get isRecording() {
+        return this.recording;
+    }
 
     constructor() {
         this.recording = false;

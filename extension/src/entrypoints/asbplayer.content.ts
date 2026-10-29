@@ -1,4 +1,5 @@
-import { asbError } from '@project/common/util';
+import project from '@project/common/project';
+import { asbError } from '@project/common/util/log';
 import type {
     AddProfileMessage,
     DictionaryBuildAnkiCacheMessage,
@@ -31,11 +32,12 @@ import type {
 import { ExtensionDictionaryStorage } from '@/services/extension-dictionary-storage';
 import { ExtensionSettingsStorage } from '@/services/extension-settings-storage';
 import { ExtensionGlobalStateProvider } from '@/services/extension-global-state-provider';
+import { configureExtensionLogProvider } from '@/services/extension-log-provider';
 
-const matches = ['*://app.asbplayer.dev/*'];
+const matches = [`*://${new URL(project.urls.app).hostname}/*`];
 
 if (import.meta.env.DEV) {
-    matches.push('*://localhost/*');
+    matches.push(`*://${project.development.host}/*`);
 }
 
 export default defineContentScript({
@@ -45,6 +47,8 @@ export default defineContentScript({
     runAt: 'document_start',
 
     main() {
+        configureExtensionLogProvider();
+
         const sendMessageToPlayer = (message: any) => {
             window.postMessage({
                 sender: 'asbplayer-extension-to-player',
@@ -311,6 +315,19 @@ export default defineContentScript({
                             sendMessageToPlayer({
                                 messageId: command.message.messageId,
                             });
+                            break;
+                        }
+                        case 'append-logs':
+                        case 'get-logs': {
+                            try {
+                                const response = await browser.runtime.sendMessage(command);
+                                sendMessageToPlayer({ response, messageId: command.message.messageId });
+                            } catch (error) {
+                                sendMessageToPlayer({
+                                    response: { error: error instanceof Error ? error.message : String(error) },
+                                    messageId: command.message.messageId,
+                                });
+                            }
                             break;
                         }
                         default:

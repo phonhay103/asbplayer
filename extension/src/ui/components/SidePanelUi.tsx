@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import SidePanel from '@project/extension/src/ui/components/SidePanel';
 import { createTheme } from '@project/common/theme';
+import { asbError } from '@project/common/util/log';
 import type { AsbplayerSettings } from '@project/common/settings';
 import { SettingsProvider } from '@project/common/settings';
 import { ExtensionSettingsStorage } from '@project/extension/src/services/extension-settings-storage';
@@ -12,6 +13,7 @@ import Paper from '@mui/material/Paper';
 import { StyledEngineProvider } from '@mui/material/styles';
 import { DictionaryProvider } from '@project/common/dictionary-db';
 import { ExtensionDictionaryStorage } from '@/services/extension-dictionary-storage';
+import { useSettingsUpdates } from '@project/extension/src/ui/hooks/use-settings-updates';
 
 const dictionaryProvider = new DictionaryProvider(new ExtensionDictionaryStorage());
 const settingsProvider = new SettingsProvider(new ExtensionSettingsStorage());
@@ -21,14 +23,22 @@ const SidePanelUi = () => {
     const extension = useChromeExtension({ component: 'sidePanel' });
     const theme = useMemo(() => settings && createTheme(settings.themeType), [settings]);
 
+    const onSettingsChanged = useSettingsUpdates(settingsProvider, setSettings);
+
     useEffect(() => {
-        void settingsProvider.getAll().then(setSettings);
+        void settingsProvider
+            .getAll()
+            .then(setSettings)
+            .catch((error) => asbError('settings', 'Failed to load extension settings:', error));
     }, []);
 
     useEffect(() => {
         return extension.subscribe((message: ExtensionMessage) => {
             if (message.data.command === 'settings-updated') {
-                void settingsProvider.getAll().then(setSettings);
+                void settingsProvider
+                    .getAll()
+                    .then(setSettings)
+                    .catch((error) => asbError('settings', 'Failed to load extension settings:', error));
             }
         });
     }, [extension]);
@@ -46,6 +56,7 @@ const SidePanelUi = () => {
                         dictionaryProvider={dictionaryProvider}
                         settingsProvider={settingsProvider}
                         settings={settings}
+                        onSettingsChanged={onSettingsChanged}
                         extension={extension}
                     />
                 </Paper>

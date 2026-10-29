@@ -1,4 +1,5 @@
-import { asbInfo, clamp } from '@project/common/util';
+import { asbInfo } from '@project/common/util/log';
+import { clamp } from '@project/common/util';
 import {
     CancelledMediaFragmentDataRenderingError,
     createVideoElement,
@@ -204,6 +205,10 @@ export class WebmFileMediaFragmentData implements MediaFragmentData {
 
     get extension() {
         return 'webm';
+    }
+
+    get animated() {
+        return true;
     }
 
     get error(): MediaFragmentErrorCode | undefined {

@@ -158,7 +158,7 @@
         },
         {
             "key": "bilibili",
-            "host": "www\\.bilibili\\.tv",
+            "host": "www\\.bilibili\\.(tv|com)",
             "pageScript": "bilibili-page.js",
             "syncAllowedAtPath": "play|video",
             "autoSync": {
@@ -242,6 +242,50 @@
             "key": "archive",
             "host": "archive\\.org",
             "searchShadowRootsForVideoElements": true
+        },
+        {
+            "key": "rutube",
+            "host": "(www\\.)?rutube\\.ru",
+            "pageScript": "rutube-page.js",
+            "syncAllowedAtPath": "video",
+            "autoSync": {
+                "enabled": true
+            }
+        },
+        {
+            "key": "okru",
+            "host": "ok\\.ru",
+            "pageScript": "okru-page.js",
+            "subtitleDiscoveryRequestTarget": "video",
+            "syncAllowedAtPath": "video",
+            "refreshSubtitleDataOnPickerOpen": true,
+            "searchShadowRootsForVideoElements": true,
+            "autoSync": {
+                "enabled": true
+            }
+        },
+        {
+            "key": "vkvideo",
+            "host": "vkvideo\\.ru",
+            "pageScript": "vkvideo-page.js",
+            "subtitleDiscoveryRequestTarget": "video",
+            "syncAllowedAtPath": "video|clip",
+            "refreshSubtitleDataOnPickerOpen": true,
+            "searchShadowRootsForVideoElements": true,
+            "autoSync": {
+                "enabled": true
+            }
+        },
+        {
+            "key": "dreaming",
+            "host": "app\\.dreaming\\.com",
+            "pageScript": "dreaming-page.js",
+            "subtitleDiscoveryRequestTarget": "video",
+            "syncAllowedAtPath": "watch",
+            "refreshSubtitleDataOnPickerOpen": true,
+            "autoSync": {
+                "enabled": true
+            }
         }
     ]
 }

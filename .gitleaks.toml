@@ -1,0 +1,14 @@
+# Extends the bundled default ruleset; entries here only silence false positives.
+[extend]
+useDefault = true
+
+# `project.json` carries the Chrome extension's `key`, which is the public
+# SubjectPublicKeyInfo from the packed extension manifest (it pins the
+# extension ID). It is published in every build, so high-entropy matching
+# treats it as an API key. Keep the allowlist to that one line so any real
+# credential pasted into project.json is still reported.
+[[allowlists]]
+description = 'Chrome extension public key in project.json is not a credential'
+paths = ['''^project\.json$''']
+regexTarget = 'line'
+regexes = ['''"key"\s*:\s*"MII''']

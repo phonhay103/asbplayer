@@ -1,4 +1,5 @@
-import { asbError, asbWarn, getTokenStatus, HAS_LETTER_REGEX, normalizeToken } from '@project/common/util';
+import { asbError, asbWarn } from '@project/common/util/log';
+import { getTokenStatus, HAS_LETTER_REGEX, normalizeToken } from '@project/common/util';
 import type { DictionaryBuildAnkiCacheState, DictionaryBuildWaniKaniCacheState } from '@project/common';
 import type {
     AsbplayerSettings,
@@ -82,7 +83,7 @@ export interface DictionaryTokenRecord {
     source: DictionaryTokenSource;
     token: string;
     status: TokenStatus | null;
-    lemmas: string[];
+    lemmas: readonly string[];
     states: TokenState[];
     cardIds: number[]; // externalIds: used to match tokens with Anki cards or WaniKani subjects (and any future external sources)
 }
@@ -90,7 +91,7 @@ export interface DictionaryTokenRecord {
 export interface DictionaryLocalTokenInput {
     token: string;
     status: TokenStatus | null;
-    lemmas: string[];
+    lemmas: readonly string[];
     states: TokenState[];
 }
 
@@ -485,18 +486,21 @@ export class DictionaryDB {
         }
 
         const tokenResults: TokenResults = {};
+        const localStatesByToken = new Map<string, TokenState[]>();
 
-        // Prioritize local tokens
+        // Local states apply even when an external record supplies the status.
+        // Only collected local statuses override external records.
         for (const [token, tokenRecords] of tokenRecordMap.entries()) {
             for (const record of tokenRecords) {
                 if (record.source !== DictionaryTokenSource.LOCAL) continue;
+                localStatesByToken.set(token, record.states);
                 tokenResults[token] = {
                     source: record.source,
                     statuses: [{ status: record.status!, suspended: false }],
                     externalCandidateStatuses: externalCandidateStatusesByToken.get(token),
                     states: record.states,
                 };
-                tokenRecordMap.delete(token);
+                if (record.status !== TokenStatus.UNCOLLECTED) tokenRecordMap.delete(token);
                 break;
             }
         }
@@ -515,7 +519,7 @@ export class DictionaryDB {
                 source: candidate.record.source,
                 statuses: candidate.statuses,
                 externalCandidateStatuses: externalCandidateStatusesByToken.get(token),
-                states: candidate.record.states,
+                states: localStatesByToken.get(token) ?? candidate.record.states,
             };
             tokenRecordMap.delete(token);
         }
@@ -530,7 +534,7 @@ export class DictionaryDB {
                     source: record.source,
                     statuses,
                     externalCandidateStatuses: externalCandidateStatusesByToken.get(token),
-                    states: record.states,
+                    states: localStatesByToken.get(token) ?? record.states,
                 };
                 break;
             }
@@ -649,7 +653,8 @@ export class DictionaryDB {
 
                         const lemmaResults: LemmaResults = {};
 
-                        // Prioritize local tokens
+                        // Return state-only local records without suppressing external matches.
+                        // Their states belong to the stored token, not every form of the lemma.
                         for (const [lemma, records] of lemmaRecordMap.entries()) {
                             for (const record of records) {
                                 if (record.source !== DictionaryTokenSource.LOCAL) continue;
@@ -665,7 +670,7 @@ export class DictionaryDB {
                                     externalCandidateStatuses: externalCandidateStatusesByLemma.get(lemma),
                                     states: record.states,
                                 });
-                                lemmaRecordMap.delete(lemma);
+                                if (record.status !== TokenStatus.UNCOLLECTED) lemmaRecordMap.delete(lemma);
                             }
                         }
                         if (!lemmaRecordMap.size) return lemmaResults;
@@ -764,7 +769,7 @@ export class DictionaryDB {
 
     async saveRecordLocalBulk(
         inputProfile: string | undefined,
-        localTokenInputs: DictionaryLocalTokenInput[],
+        localTokenInputs: readonly DictionaryLocalTokenInput[],
         applyStates: ApplyStrategy
     ): Promise<DictionarySaveRecordLocalResult> {
         if (!localTokenInputs.length) return { savedTokens: [], deletedTokens: [] };
@@ -789,26 +794,24 @@ export class DictionaryDB {
                     continue;
                 }
                 const existingRecord = tokenRecordMap.get(localTokenInput.token); // Ignore existing lemmas as they should be re-calculated
+                let status = localTokenInput.status;
+                let states = localTokenInput.states;
                 if (existingRecord) {
-                    if (localTokenInput.status == null) localTokenInput.status = existingRecord.status;
-                    localTokenInput.states = _applyStrategyToStates(
-                        existingRecord.states,
-                        localTokenInput.states,
-                        applyStates
-                    );
-                } else if (localTokenInput.status == null) {
-                    localTokenInput.status = TokenStatus.UNCOLLECTED;
+                    if (status == null) status = existingRecord.status;
+                    states = _applyStrategyToStates(existingRecord.states, states, applyStates);
+                } else if (status == null) {
+                    status = TokenStatus.UNCOLLECTED;
                 }
-                localTokenInput.states = Array.from(new Set(localTokenInput.states)).sort((lhs, rhs) => lhs - rhs);
-                localTokenInput.lemmas = localTokenInput.lemmas.filter((lemma) => HAS_LETTER_REGEX.test(lemma));
-                if (!localTokenInput.lemmas.length) {
+                states = Array.from(new Set(states)).sort((lhs, rhs) => lhs - rhs);
+                const lemmas = localTokenInput.lemmas.filter((lemma) => HAS_LETTER_REGEX.test(lemma));
+                if (!lemmas.length) {
                     asbError(
                         'dictionary',
                         `Cannot save local token with no lemmas: ${JSON.stringify(localTokenInput)}`
                     );
                     continue;
                 }
-                if (localTokenInput.status === TokenStatus.UNCOLLECTED && !localTokenInput.states.length) {
+                if (status === TokenStatus.UNCOLLECTED && !states.length) {
                     if (existingRecord) {
                         tokensToDelete.push(localTokenInput.token);
                         continue;
@@ -825,9 +828,9 @@ export class DictionaryDB {
                     track: LOCAL_TOKEN_TRACK,
                     source: DictionaryTokenSource.LOCAL,
                     token: localTokenInput.token,
-                    status: localTokenInput.status,
-                    lemmas: localTokenInput.lemmas,
-                    states: localTokenInput.states,
+                    status,
+                    lemmas,
+                    states,
                     cardIds: [],
                 });
             }

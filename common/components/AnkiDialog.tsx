@@ -1,5 +1,5 @@
+import { asbInfo } from '@project/common/util/log';
 import {
-    asbInfo,
     humanReadableTime,
     surroundingSubtitlesAroundInterval,
     subtitleIntersectsTimeInterval,
@@ -119,7 +119,15 @@ type Mark = {
     label: string;
 };
 
-const sliderMarksFromCard = (surroundingSubtitles: SubtitleModel[], boundary: number[]): Mark[] => {
+const sliderMarksFromCard = (
+    surroundingSubtitles: SubtitleModel[],
+    boundary: number[] | undefined
+): Mark[] | undefined => {
+    // A card whose surrounding subtitles collapse to a single subtitle has no boundary, and so no slider.
+    if (boundary === undefined) {
+        return undefined;
+    }
+
     const seenTimestamps: any = {};
 
     return surroundingSubtitles
@@ -377,7 +385,7 @@ const AnkiDialog = ({
             initialSelectedTimestampInterval || [card.subtitle.start, card.subtitle.end] || undefined;
         const timestampBoundaryInterval =
             boundaryIntervalFromCard(card.subtitle, card.surroundingSubtitles) || undefined;
-        const timestampMarks = sliderMarksFromCard(card.surroundingSubtitles, timestampBoundaryInterval!) || undefined;
+        const timestampMarks = sliderMarksFromCard(card.surroundingSubtitles, timestampBoundaryInterval);
         const selectedSubtitles =
             timestampInterval === undefined
                 ? []
@@ -483,7 +491,8 @@ const AnkiDialog = ({
                 settings.mediaFragmentFormat,
                 settings.mediaFragmentTrimStart,
                 settings.mediaFragmentTrimEnd,
-                settings.mediaFragmentMaxClipLength
+                settings.mediaFragmentMaxClipLength,
+                settings.trimBlackBars
             );
 
             setImageTimestampInterval(
@@ -503,6 +512,7 @@ const AnkiDialog = ({
         settings.mediaFragmentTrimStart,
         settings.mediaFragmentTrimEnd,
         settings.mediaFragmentMaxClipLength,
+        settings.trimBlackBars,
     ]);
 
     useEffect(() => {
@@ -687,7 +697,7 @@ const AnkiDialog = ({
                 return;
             }
 
-            if (image.extension === 'webm') {
+            if (image.animated) {
                 return;
             }
 

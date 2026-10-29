@@ -1,4 +1,4 @@
-import { asbError } from '@project/common/util';
+import { asbError } from '@project/common/util/log';
 import type {
     AlertMessage,
     AnkiSettingsToVideoMessage,
@@ -583,6 +583,7 @@ export default class VideoChannel {
             subtitlePositionOffset: bottomSubtitlePositionOffset,
             topSubtitlePositionOffset,
             subtitlesWidth,
+            subtitlesWidthUnit,
         } = settings;
         const message: SubtitleSettingsToVideoMessage = {
             command: 'subtitleSettings',
@@ -605,6 +606,7 @@ export default class VideoChannel {
                 subtitlePositionOffset: bottomSubtitlePositionOffset,
                 topSubtitlePositionOffset,
                 subtitlesWidth,
+                subtitlesWidthUnit,
             },
         };
         this.protocol.postMessage(message);
@@ -662,6 +664,8 @@ export default class VideoChannel {
             customAnkiFields,
             tags,
             preferMp3,
+            alwaysUseSubtitleForSentence,
+            updateLastCardForSameSubtitle,
             audioPaddingStart,
             audioPaddingEnd,
             maxImageWidth,
@@ -670,6 +674,7 @@ export default class VideoChannel {
             mediaFragmentTrimStart,
             mediaFragmentTrimEnd,
             mediaFragmentMaxClipLength,
+            trimBlackBars,
             surroundingSubtitlesCountRadius,
             surroundingSubtitlesTimeRadius,
             ankiFieldSettings,
@@ -697,6 +702,8 @@ export default class VideoChannel {
                 customAnkiFields,
                 tags,
                 preferMp3,
+                alwaysUseSubtitleForSentence,
+                updateLastCardForSameSubtitle,
                 audioPaddingStart,
                 audioPaddingEnd,
                 maxImageWidth,
@@ -705,6 +712,7 @@ export default class VideoChannel {
                 mediaFragmentTrimStart,
                 mediaFragmentTrimEnd,
                 mediaFragmentMaxClipLength,
+                trimBlackBars,
                 surroundingSubtitlesCountRadius,
                 surroundingSubtitlesTimeRadius,
                 ankiFieldSettings,
@@ -738,6 +746,7 @@ export default class VideoChannel {
             fastForwardPlaybackMinimumSkipIntervalMs,
             streamingCondensedPlaybackMinimumSkipIntervalMs,
             repeatCountPreference,
+            repeatsBeforeShowingSubtitles,
             autoPauseResumeMode,
             autoPauseResumeDelayMs,
             autoPauseFixedDurationMs,
@@ -770,6 +779,8 @@ export default class VideoChannel {
         const message: MiscSettingsToVideoMessage = {
             command: 'miscSettings',
             value: {
+                recipes: settings.recipes,
+                activeRecipeId: settings.activeRecipeId,
                 themeType,
                 videoSubtitleSplitBehavior,
                 showSubtitleListMiningButton,
@@ -791,6 +802,7 @@ export default class VideoChannel {
                 fastForwardPlaybackMinimumSkipIntervalMs,
                 streamingCondensedPlaybackMinimumSkipIntervalMs,
                 repeatCountPreference,
+                repeatsBeforeShowingSubtitles,
                 autoPauseResumeMode,
                 autoPauseResumeDelayMs,
                 autoPauseFixedDurationMs,

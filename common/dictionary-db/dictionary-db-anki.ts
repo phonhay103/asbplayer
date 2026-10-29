@@ -1,4 +1,5 @@
-import { asbError, HAS_LETTER_REGEX, inBatches, mapAsync } from '@project/common/util';
+import { asbError } from '@project/common/util/log';
+import { HAS_LETTER_REGEX, inBatches, mapAsync } from '@project/common/util';
 import type { NoteInfo } from '@project/common/anki';
 import { Anki, escapeAnkiDeckQuery, escapeAnkiQuery } from '@project/common/anki';
 import type {
@@ -460,9 +461,13 @@ export async function _syncTrackStatesWithAnki(
 
         let modified = false;
         const existingAnkiCards = existingAnkiNoteIdMap.get(noteInfo.noteId);
+        const filledFieldNames = Object.entries(noteInfo.fields)
+            .filter(([, { value }]) => value.trim().length)
+            .map(([fieldName]) => fieldName);
         for (const [track, ts] of trackStates.entries()) {
-            if (!_hasField(ts.dt, Object.keys(noteInfo.fields))) continue;
             const dbCards = existingAnkiCards?.filter((ankiCard) => ankiCard.track === track) ?? [];
+            const fieldNames = dbCards.length ? Object.keys(noteInfo.fields) : filledFieldNames; // Cached cards may need removal if their fields were blanked, uncached cards are only worth building if filled
+            if (!_hasField(ts.dt, fieldNames)) continue;
             if (dbCards.some((a) => a.modifiedAt !== modifiedAt) || (!dbCards.length && noteInfo.cards.length)) {
                 modified = true;
                 break;
@@ -579,26 +584,32 @@ export async function _buildAnkiCardStatuses(
     const query = decks.length ? `(${decks}) (${fields})` : fields;
     const matureCutoff = ts.dt.dictionaryAnkiMatureCutoff;
     const gradCutoff = Math.ceil(matureCutoff / 2);
-    let numRemaining = Array.from(modifiedCards.values()).filter(
-        (card) => _hasDeck(ts.dt, card.data.deckName) && _hasField(ts.dt, Array.from(card.fields.keys()))
-    ).length;
 
-    numRemaining = _processAnkiCardStatuses(
+    // Anki's field search also matches whitespace-only values, which are not relevant once trimmed
+    const remainingCardIds = new Set<number>();
+    for (const [cardId, card] of modifiedCards.entries()) {
+        if (_hasDeck(ts.dt, card.data.deckName) && _hasField(ts.dt, Array.from(card.fields.keys()))) {
+            remainingCardIds.add(cardId);
+        }
+    }
+    if (!remainingCardIds.size) return;
+
+    _processAnkiCardStatuses(
         track,
         await anki.findCards(`is:new (${query})`),
         modifiedCards,
         TokenStatus.UNKNOWN,
-        numRemaining
+        remainingCardIds
     );
-    if (numRemaining === 0) return;
-    numRemaining = _processAnkiCardStatuses(
+    if (!remainingCardIds.size) return;
+    _processAnkiCardStatuses(
         track,
         await anki.findCards(`is:learn (${query})`),
         modifiedCards,
         TokenStatus.LEARNING,
-        numRemaining
+        remainingCardIds
     );
-    if (numRemaining === 0) return;
+    if (!remainingCardIds.size) return;
 
     // AnkiConnect doesn't expose Stability but we can retrieve it using search queries.
     // Stability is undefined for cards reviewed without FSRS so some cards may need to fallback to Interval.
@@ -606,50 +617,49 @@ export async function _buildAnkiCardStatuses(
     const startIndex = (await anki.findCards(`prop:s>=0 (${query})`)).length ? 0 : 1; // No cards are returned if FSRS is disabled
     for (let i = startIndex; i < props.length; i++) {
         const prop = props[i];
-        numRemaining = _processAnkiCardStatuses(
+        _processAnkiCardStatuses(
             track,
             await anki.findCards(`-is:new -is:learn ${prop}<${gradCutoff} (${query})`),
             modifiedCards,
             TokenStatus.GRADUATED,
-            numRemaining
+            remainingCardIds
         );
-        if (numRemaining === 0) return;
-        numRemaining = _processAnkiCardStatuses(
+        if (!remainingCardIds.size) return;
+        _processAnkiCardStatuses(
             track,
             await anki.findCards(`-is:new -is:learn ${prop}>=${gradCutoff} ${prop}<${matureCutoff} (${query})`),
             modifiedCards,
             TokenStatus.YOUNG,
-            numRemaining
+            remainingCardIds
         );
-        if (numRemaining === 0) return;
-        numRemaining = _processAnkiCardStatuses(
+        if (!remainingCardIds.size) return;
+        _processAnkiCardStatuses(
             track,
             await anki.findCards(`-is:new -is:learn ${prop}>=${matureCutoff} (${query})`),
             modifiedCards,
             TokenStatus.MATURE,
-            numRemaining
+            remainingCardIds
         );
-        if (numRemaining === 0) return;
+        if (!remainingCardIds.size) return;
     }
-    if (numRemaining !== 0) {
-        throw new Error('Anki changed during status build, some cards statuses could not be determined.');
-    }
+    throw new Error('Anki changed during status build, some cards statuses could not be determined.');
 }
 
+/**
+ * Assigns `status` to the cards in `cardIds` that still need a status, removing them from `remainingCardIds`.
+ */
 export function _processAnkiCardStatuses(
     track: number,
     cardIds: number[],
     modifiedCards: CardsForDB,
     status: TokenStatus,
-    numRemaining: number
-): number {
+    remainingCardIds: Set<number>
+): void {
     for (const cardId of cardIds) {
-        const updatedCard = modifiedCards.get(cardId);
-        if (!updatedCard || updatedCard.statuses.has(track)) continue;
-        updatedCard.statuses.set(track, status);
-        if (--numRemaining === 0) break;
+        if (!remainingCardIds.delete(cardId)) continue;
+        modifiedCards.get(cardId)!.statuses.set(track, status);
+        if (!remainingCardIds.size) break;
     }
-    return numRemaining;
 }
 
 export async function _updateBuildAnkiCacheProgress(
@@ -800,7 +810,7 @@ export async function _buildTokensForTracks(
 
             const partialTokenRecordsByTrack = new Map<
                 number,
-                Map<DictionaryTokenSource, Map<string, { lemmas: string[]; cardIds: Set<number> }>>
+                Map<DictionaryTokenSource, Map<string, { lemmas: readonly string[]; cardIds: Set<number> }>>
             >();
             const ankiFieldsMap = new Map<number, Map<DictionaryTokenSource, string[]>>();
             for (const [track, ts] of trackStates.entries()) {
@@ -937,7 +947,7 @@ export async function _saveTokensForDB(
     modifiedCardsBatch: CardsForDB,
     partialTokenRecordsByTrack: Map<
         number,
-        Map<DictionaryTokenSource, Map<string, { lemmas: string[]; cardIds: Set<number> }>>
+        Map<DictionaryTokenSource, Map<string, { lemmas: readonly string[]; cardIds: Set<number> }>>
     >,
     modifiedTokens: Set<string>
 ): Promise<void> {

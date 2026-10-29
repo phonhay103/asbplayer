@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { AutoPausePreference, PlayMode } from '@project/common';
+import { AutoPausePreference, PlayMode, PostMineAction, SubtitleHtml } from '@project/common';
 import type { IndexedSubtitleModel } from '@project/common';
+import { defaultSettings, SubtitleListPreference, TokenStatus } from '@project/common/settings';
+import type { DictionaryTrack } from '@project/common/settings';
 import Binding from '@project/extension/src/services/binding';
 import type { BindingOptions } from '@project/extension/src/services/binding';
 import { MockStorageArea } from '@project/extension/src/services/mock-storage-area';
@@ -10,8 +12,11 @@ const bindingOptions = (hasPageScript: boolean, videoSrcChangesIndicateNewVideo:
     videoSrcChangesIndicateNewVideo,
 });
 
-jest.mock('@project/common/subtitle-reader', () => ({
-    SubtitleReader: class SubtitleReader {},
+// The tests parse WebVTT with the real SubtitleReader. This unused dependency
+// ships as ESM, which the extension's Jest configuration does not transform.
+jest.mock('@qgustavor/srt-parser', () => ({
+    __esModule: true,
+    default: class {},
 }));
 jest.mock('@project/extension/src/services/localization-fetcher', () => ({
     fetchLocalization: jest.fn(async () => ({})),
@@ -61,6 +66,8 @@ jest.mock('@project/extension/src/controllers/mobile-video-overlay-controller', 
 jest.mock('@project/extension/src/controllers/notification-controller', () => ({
     __esModule: true,
     default: class NotificationController {
+        hide() {}
+        async showSnackbar() {}
         unbind() {}
     },
 }));
@@ -107,6 +114,7 @@ const makeSubtitle = (overrides: Partial<IndexedSubtitleModel> = {}): IndexedSub
 describe('Binding playback mode integration', () => {
     const runtimeListeners = new Set<(request: any, sender: any, sendResponse: (response?: any) => void) => void>();
     let storage: MockStorageArea;
+    let sendRuntimeMessage: jest.Mock<() => Promise<void>>;
 
     type FrameTestVideo = HTMLVideoElement & { presentFrame(timestampMs: number): void };
 
@@ -197,17 +205,51 @@ describe('Binding playback mode integration', () => {
             (element) => element.textContent?.trim() ?? ''
         );
 
+    const renderedSubtitleTexts = () =>
+        Array.from(
+            document.querySelectorAll(
+                '.asbplayer-subtitles-container-bottom span[data-track], .asbplayer-subtitles-container-top span[data-track]'
+            )
+        )
+            .filter((element) => !element.closest('[style*="display: none"], [aria-hidden="true"]'))
+            .map((element) => element.textContent?.trim() ?? '');
+
+    const sendSettingsUpdated = (binding: Binding) => {
+        const request = {
+            sender: 'asbplayer-extension-to-video',
+            src: binding.registeredVideoSrc,
+            message: { command: 'settings-updated' },
+        };
+        for (const listener of runtimeListeners) listener(request, {}, () => undefined);
+    };
+
+    const vttFile = (
+        text: string,
+        name = 'subtitles.vtt',
+        readText: (content: string) => Promise<string> = async (content) => content
+    ): File => {
+        const content = `WEBVTT\n\n00:00:00.000 --> 00:00:10.000\n${text}\n\n`;
+        const file = new File([content], name);
+        // jsdom's File lacks the browser's Blob reading methods.
+        Object.defineProperties(file, {
+            text: { value: () => readText(content) },
+            arrayBuffer: { value: async () => new Uint8Array(Buffer.from(content)).buffer },
+        });
+        return file;
+    };
+
     beforeEach(() => {
         jest.useFakeTimers();
         jest.spyOn(console, 'warn').mockImplementation(() => undefined);
         jest.spyOn(console, 'error').mockImplementation(() => undefined);
         runtimeListeners.clear();
         storage = new MockStorageArea();
+        sendRuntimeMessage = jest.fn(async () => undefined);
         (globalThis as any).browser = {
             storage: { local: storage },
             runtime: {
                 getURL: (path: string) => `moz-extension://test${path}`,
-                sendMessage: jest.fn(async () => undefined),
+                sendMessage: sendRuntimeMessage,
                 onMessage: {
                     addListener: (listener: (request: any, sender: any, sendResponse: () => void) => void) =>
                         runtimeListeners.add(listener),
@@ -223,6 +265,490 @@ describe('Binding playback mode integration', () => {
         jest.useRealTimers();
         delete (globalThis as any).browser;
         document.body.replaceChildren();
+    });
+
+    it('updates visible subtitles when a filter or replacement changes and restores the original text', async () => {
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('（汐莉）随分 昔の話です')], false);
+        video.presentFrame(2000);
+        await jest.advanceTimersByTimeAsync(1000);
+        expect(renderedSubtitleTexts()).toEqual(['（汐莉）随分 昔の話です']);
+
+        await storage.set({
+            subtitleRegexFilter: String.raw`([\(（]([^\(\)（）]|(([\(（][^\(\)（）]+[\)）])))+[\)）])`,
+        });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(renderedSubtitleTexts()).toEqual(['随分 昔の話です']);
+        expect(video.currentTime).toBe(2);
+
+        await storage.set({ subtitleRegexFilterTextReplacement: '話者：' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(renderedSubtitleTexts()).toEqual(['話者：随分 昔の話です']);
+
+        await storage.set({ subtitleRegexFilter: '' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(renderedSubtitleTexts()).toEqual(['（汐莉）随分 昔の話です']);
+        binding.unbind();
+    });
+
+    it.each([0, 500, -500])('refreshes subtitles with their current offset %s and flattened tracks', async (offset) => {
+        await storage.set({ rememberSubtitleOffset: false });
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('speaker: first'), vttFile('speaker: second', 'second.vtt')], true);
+        video.presentFrame(2000);
+        binding.subtitleOffsetChanged(offset, { notifyPlayer: false });
+        await flushPlaybackTiming();
+
+        await storage.set({ subtitleRegexFilter: '^speaker: ' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles).toEqual([
+            expect.objectContaining({
+                text: 'first',
+                start: offset,
+                end: 10000 + offset,
+                originalStart: 0,
+                track: 0,
+                index: 0,
+            }),
+            expect.objectContaining({
+                text: 'second',
+                start: offset,
+                end: 10000 + offset,
+                originalStart: 0,
+                track: 0,
+                index: 1,
+            }),
+        ]);
+        expect(binding.subtitleController.subtitleFileNames).toEqual(['subtitles.vtt']);
+        expect(video.currentTime).toBe(2);
+        binding.unbind();
+    });
+
+    it('refreshes original subtitle markup when HTML or ruby conversion changes in either direction', async () => {
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('<b>漢字(かんじ)</b>')], false);
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('漢字(かんじ)');
+
+        await storage.set({ subtitleHtml: SubtitleHtml.render });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('<b>漢字(かんじ)</b>');
+
+        await storage.set({ convertNetflixRuby: true });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('<b>漢字</b>');
+        expect(binding.subtitleController.subtitles[0]?.tokenization?.tokens[0].readings).toEqual([
+            { pos: [0, 2], reading: 'かんじ' },
+        ]);
+
+        await storage.set({ convertNetflixRuby: false });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('<b>漢字(かんじ)</b>');
+
+        await storage.set({ subtitleHtml: SubtitleHtml.remove });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('漢字(かんじ)');
+        binding.unbind();
+    });
+
+    it('uses a newly active profile to filter already loaded subtitles', async () => {
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('（汐莉）随分 昔の話です')], false);
+        await binding.settings.addProfile('Filtered');
+        await binding.settings.setActiveProfile('Filtered');
+        await binding.settings.set({ subtitleRegexFilter: String.raw`[\(（][^\)）]+[\)）]` });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('随分 昔の話です');
+        binding.unbind();
+    });
+
+    it('leaves web app subtitles authoritative after a locally parsed source', async () => {
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('local subtitles')], false);
+        sendSubtitles(binding, [makeSubtitle({ text: 'web app subtitles' })]);
+        await storage.set({ subtitleRegexFilter: '.+' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('web app subtitles');
+        binding.unbind();
+    });
+
+    it('does not parse subtitle files locally when the web app owns the subtitle list', async () => {
+        await storage.set({ streamingSubtitleListPreference: SubtitleListPreference.app });
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('local subtitles')], false);
+        await storage.set({ subtitleRegexFilter: '.+' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles).toEqual([]);
+        binding.unbind();
+    });
+
+    it('does not revert subtitles when an older settings refresh completes last', async () => {
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('speaker: dialogue')], false);
+
+        await storage.set({ subtitleRegexFilter: '^speaker: ' });
+        const olderSettings = await binding.settings.getAll();
+        let finishRefresh: () => void = () => {};
+        jest.spyOn(binding.settings, 'getAll').mockImplementationOnce(
+            () => new Promise((resolve) => (finishRefresh = () => resolve(olderSettings)))
+        );
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+
+        await storage.set({ subtitleRegexFilterTextReplacement: 'name: ' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles.map((subtitle) => subtitle.text)).toEqual(['name: dialogue']);
+
+        finishRefresh();
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles.map((subtitle) => subtitle.text)).toEqual(['name: dialogue']);
+        binding.unbind();
+    });
+
+    it('saves playback positions only for the tracks present after a settings refresh', async () => {
+        await storage.set({ subtitleRegexFilter: '^hidden$' });
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        const longCue = async (content: string) => content.replace('00:00:10.000', '00:10:00.000');
+        await binding.loadSubtitles(
+            [vttFile('visible', 'first.vtt', longCue), vttFile('hidden', 'second.vtt', longCue)],
+            false
+        );
+        video.currentTime = 62;
+        await jest.advanceTimersByTimeAsync(10_000);
+        expect((await storage.get('lastPlaybackPositions')).lastPlaybackPositions).toEqual([
+            { fileName: 'first.vtt', position: 62_000 },
+        ]);
+
+        await storage.set({ subtitleRegexFilter: '^visible$' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        video.currentTime = 63;
+        await jest.advanceTimersByTimeAsync(10_000);
+        expect((await storage.get('lastPlaybackPositions')).lastPlaybackPositions).toEqual([
+            { fileName: 'second.vtt', position: 63_000 },
+            { fileName: 'first.vtt', position: 62_000 },
+        ]);
+        binding.unbind();
+    });
+
+    it('keeps the latest replacement when an earlier settings parse finishes later', async () => {
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        let delayNextRead = false;
+        let finishRead: () => void = () => {};
+        const file = vttFile('（汐莉）随分 昔の話です', 'subtitles.vtt', async (content) => {
+            if (!delayNextRead) return content;
+            delayNextRead = false;
+            return new Promise<string>((resolve) => (finishRead = () => resolve(content)));
+        });
+        await binding.loadSubtitles([file], false);
+
+        delayNextRead = true;
+        await storage.set({ subtitleRegexFilter: String.raw`[\(（][^\)）]+[\)）]` });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        await storage.set({ subtitleRegexFilterTextReplacement: '話者：' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('話者：随分 昔の話です');
+
+        finishRead();
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('話者：随分 昔の話です');
+        binding.unbind();
+    });
+
+    it.each(['new files', 'web app', 'unbind'] as const)(
+        'discards a pending settings parse after %s takes over',
+        async (nextSource) => {
+            const binding = new Binding(createVideo(), bindingOptions(false, false));
+            binding.bind();
+            await flushPlaybackTiming();
+            let delayNextRead = false;
+            let finishRead: () => void = () => {};
+            const file = vttFile('old subtitles', 'subtitles.vtt', async (content) => {
+                if (!delayNextRead) return content;
+                return new Promise<string>((resolve) => (finishRead = () => resolve(content)));
+            });
+            await binding.loadSubtitles([file], false);
+
+            delayNextRead = true;
+            await storage.set({ subtitleRegexFilter: '.+' });
+            sendSettingsUpdated(binding);
+            await flushPlaybackTiming();
+            if (nextSource === 'new files') {
+                await storage.set({ subtitleRegexFilter: '' });
+                await binding.loadSubtitles([vttFile('new subtitles', 'new.vtt')], false);
+            } else if (nextSource === 'web app') {
+                sendSubtitles(binding, [makeSubtitle({ text: 'new subtitles' })]);
+            } else {
+                binding.unbind();
+            }
+
+            finishRead();
+            await flushPlaybackTiming();
+            if (nextSource === 'unbind') {
+                expect(binding.subtitleController.subtitles).toEqual([]);
+            } else {
+                expect(binding.subtitleController.subtitles[0]?.text).toBe('new subtitles');
+                binding.unbind();
+            }
+        }
+    );
+
+    it.each(['initial load', 'settings refresh'] as const)(
+        'uses the parsed subtitle end for playback positions after %s',
+        async (path) => {
+            const filter = '^hide$';
+            await storage.set({
+                subtitleRegexFilter: path === 'initial load' ? filter : '',
+                lastPlaybackPositions: [{ fileName: 'episode.vtt', position: 63_000 }],
+            });
+            const video = createVideo();
+            const binding = new Binding(video, bindingOptions(false, false));
+            binding.bind();
+            await flushPlaybackTiming();
+            const file = vttFile(
+                'keep',
+                'episode.vtt',
+                async (content) =>
+                    content.replace('00:00:10.000', '00:00:40.000') + '00:01:00.000 --> 00:02:00.000\nhide\n\n'
+            );
+            await binding.loadSubtitles([file], false);
+            if (path === 'settings refresh') {
+                await storage.set({ subtitleRegexFilter: filter });
+                sendSettingsUpdated(binding);
+                await flushPlaybackTiming();
+            }
+            video.currentTime = 63;
+            await jest.advanceTimersByTimeAsync(10_000);
+            expect(binding.subtitleController.subtitles.map((subtitle) => subtitle.text)).toEqual(['keep']);
+            expect((await storage.get('lastPlaybackPositions')).lastPlaybackPositions).toEqual([]);
+            binding.unbind();
+        }
+    );
+
+    it('resets playback when a settings refresh removes every subtitle', async () => {
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        await binding.loadSubtitles([vttFile('dialogue')], false);
+        binding.togglePlayMode(PlayMode.fastForward);
+        const getModes = () =>
+            ((browser.runtime.sendMessage as any).mock.calls as any[][])
+                .filter(([command]) => command.message?.command === 'playModes')
+                .at(-1)?.[0].message.playModes;
+        expect(getModes()).toContain(PlayMode.fastForward);
+
+        await storage.set({ subtitleRegexFilter: '.+' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles).toEqual([]);
+        expect(getModes()).toEqual([PlayMode.normal]);
+
+        await storage.set({ subtitleRegexFilter: '' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        expect(binding.subtitleController.subtitles[0]?.text).toBe('dialogue');
+        expect(getModes()).toEqual([PlayMode.normal]);
+        binding.unbind();
+    });
+
+    it('keeps the latest language after a superseded parse finishes', async () => {
+        const { i18nInit } = await import('@project/extension/src/services/i18n');
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        let delayNextRead = false;
+        let finishRead: () => void = () => {};
+        const file = vttFile('speaker: dialogue', 'episode.vtt', async (content) => {
+            if (!delayNextRead) return content;
+            delayNextRead = false;
+            return new Promise<string>((resolve) => (finishRead = () => resolve(content)));
+        });
+        await binding.loadSubtitles([file], false);
+        (i18nInit as any).mockClear();
+        delayNextRead = true;
+        await storage.set({ subtitleRegexFilter: '^speaker: ', language: 'ja' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        await storage.set({ subtitleRegexFilterTextReplacement: 'name: ', language: 'es' });
+        sendSettingsUpdated(binding);
+        await flushPlaybackTiming();
+        finishRead();
+        await flushPlaybackTiming();
+        const languages = (i18nInit as any).mock.calls.map(([language]: [string]) => language);
+        binding.unbind();
+        expect(languages.at(-1)).toBe('es');
+    });
+
+    const shortcutRecipes = [
+        { name: 'Reading', playbackModes: [PlayMode.normal], settings: { playbackRate: 0.8 } },
+        { name: 'Listening', playbackModes: [PlayMode.normal], settings: { playbackRate: 1.2 } },
+    ];
+
+    it.each([
+        { initialRecipeId: null, action: 0 as const, activeRecipeId: 0, playbackRate: 0.8 },
+        { initialRecipeId: 0, action: 0 as const, activeRecipeId: null, playbackRate: 1 },
+    ])('applies saved recipe action $action locally when its broadcast fails', async (selection) => {
+        await storage.set({ recipes: shortcutRecipes, activeRecipeId: selection.initialRecipeId });
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        sendSubtitles(binding, [makeSubtitle()]);
+        await flushPlaybackTiming();
+        const error = new Error('unavailable');
+        sendRuntimeMessage.mockRejectedValueOnce(error);
+
+        try {
+            await expect(binding.selectRecipe(selection.action)).rejects.toThrow(error);
+
+            expect(await binding.settings.getSingle('activeRecipeId')).toBe(selection.activeRecipeId);
+            expect(video.playbackRate).toBe(selection.playbackRate);
+        } finally {
+            binding.unbind();
+        }
+    });
+
+    it.each([
+        { recipeCount: 0, action: 'cycleForward' as const, activeRecipeId: null },
+        { recipeCount: 1, action: 'cycleForward' as const, activeRecipeId: null },
+        { recipeCount: 2, action: 'cycleForward' as const, activeRecipeId: 1 },
+        { recipeCount: 0, action: 0, activeRecipeId: null },
+        { recipeCount: 1, action: 0, activeRecipeId: null },
+        { recipeCount: 2, action: 0, activeRecipeId: null },
+    ])(
+        'applies overlapping $action shortcuts with $recipeCount recipes',
+        async ({ recipeCount, action, activeRecipeId }) => {
+            const recipes = shortcutRecipes.slice(0, recipeCount);
+            await storage.set({ recipes, activeRecipeId: null });
+            const video = createVideo();
+            const binding = new Binding(video, bindingOptions(false, false));
+            binding.bind();
+            await flushPlaybackTiming();
+            sendSubtitles(binding, [makeSubtitle()]);
+            await flushPlaybackTiming();
+
+            try {
+                await Promise.all([binding.selectRecipe(action), binding.selectRecipe(action)]);
+
+                expect(await binding.settings.getSingle('activeRecipeId')).toBe(activeRecipeId);
+                expect(video.playbackRate).toBe(
+                    activeRecipeId === null
+                        ? defaultSettings.playbackRate
+                        : recipes[activeRecipeId].settings.playbackRate
+                );
+            } finally {
+                binding.unbind();
+            }
+        }
+    );
+
+    it('cycles from a preceding overlapping recipe selection', async () => {
+        await storage.set({ recipes: shortcutRecipes, activeRecipeId: null });
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        sendSubtitles(binding, [makeSubtitle()]);
+        await flushPlaybackTiming();
+
+        try {
+            await Promise.all([binding.selectRecipe(0), binding.selectRecipe('cycleForward')]);
+
+            expect(await binding.settings.getSingle('activeRecipeId')).toBe(1);
+            expect(video.playbackRate).toBe(shortcutRecipes[1].settings.playbackRate);
+        } finally {
+            binding.unbind();
+        }
+    });
+
+    it.each([
+        { boundary: 'save', activeRecipeId: 0 },
+        { boundary: 'notification', activeRecipeId: 1 },
+    ])('continues queued recipe selections after a failed $boundary', async ({ boundary, activeRecipeId }) => {
+        await storage.set({ recipes: shortcutRecipes, activeRecipeId: null });
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        sendSubtitles(binding, [makeSubtitle()]);
+        await flushPlaybackTiming();
+        const error = new Error('unavailable');
+        if (boundary === 'save') jest.spyOn(storage, 'set').mockRejectedValueOnce(error);
+        else sendRuntimeMessage.mockRejectedValueOnce(error);
+
+        try {
+            const failedSelection = binding.selectRecipe('cycleForward');
+            const nextSelection = binding.selectRecipe('cycleForward');
+            await expect(failedSelection).rejects.toThrow(error);
+            await nextSelection;
+
+            expect(await binding.settings.getSingle('activeRecipeId')).toBe(activeRecipeId);
+            expect(video.playbackRate).toBe(shortcutRecipes[activeRecipeId].settings.playbackRate);
+        } finally {
+            binding.unbind();
+        }
+    });
+
+    it.each([
+        { synced: false, hasSubtitles: false },
+        { synced: true, hasSubtitles: false },
+        { synced: true, hasSubtitles: true },
+    ])('shows recipe text with synced $synced and subtitles $hasSubtitles', async ({ synced, hasSubtitles }) => {
+        await storage.set({
+            recipes: [{ name: 'Reading', playbackModes: [PlayMode.normal], settings: { playbackRate: 1.2 } }],
+            activeRecipeId: null,
+        });
+        const binding = new Binding(createVideo(), bindingOptions(false, false));
+        binding.bind();
+        await flushPlaybackTiming();
+        if (synced) sendSubtitles(binding, hasSubtitles ? [makeSubtitle()] : []);
+        await jest.advanceTimersByTimeAsync(6000);
+        const notification = jest.spyOn(binding.subtitleController, 'notification').mockImplementation(() => {});
+        await storage.set({ activeRecipeId: 0 });
+        const request = {
+            sender: 'asbplayer-extension-to-video',
+            src: binding.registeredVideoSrc,
+            message: { command: 'settings-updated' },
+        };
+        for (const listener of runtimeListeners) listener(request, {}, () => undefined);
+        await flushPlaybackTiming();
+        if (synced && hasSubtitles) expect(notification).toHaveBeenCalledWith({ text: 'recipes.notification' });
+        else expect(notification).not.toHaveBeenCalled();
+        binding.unbind();
     });
 
     it('applies playback modes through real video timing without overwriting the inactive rate', async () => {
@@ -268,6 +794,209 @@ describe('Binding playback mode integration', () => {
         expect(binding.subtitleController.currentSubtitle()[0]?.text).toBe('subtitle');
         binding.unbind();
     });
+
+    it.each([
+        { enabled: false, text: 'External sentence', expected: 'External sentence' },
+        { enabled: true, text: 'External sentence', expected: 'Original subtitle\nTranslation' },
+        { enabled: false, text: undefined, expected: 'Original subtitle\nTranslation' },
+        { enabled: false, text: 'subtitle', expected: 'Original subtitle\nTranslation' },
+    ])(
+        'mines sentence text with subtitle preference $enabled and external text $text',
+        async ({ enabled, text, expected }) => {
+            await storage.set({
+                alwaysUseSubtitleForSentence: enabled,
+                streamingRecordMedia: false,
+                streamingTakeScreenshot: false,
+            });
+            const video = createVideo();
+            const binding = new Binding(video, bindingOptions(false, false));
+            binding.bind();
+            await jest.advanceTimersByTimeAsync(0);
+            const subtitle = makeSubtitle({ text: 'Original subtitle' });
+            const surroundingSubtitles = [subtitle, makeSubtitle({ text: 'Translation', track: 1, index: 1 })];
+            sendSubtitles(binding, surroundingSubtitles);
+
+            const request = {
+                sender: 'asbplayer-extension-to-video',
+                src: binding.registeredVideoSrc,
+                message: {
+                    command: 'copy-subtitle',
+                    postMineAction: PostMineAction.updateLastCard,
+                    subtitle,
+                    surroundingSubtitles,
+                    text,
+                    word: 'word',
+                    definition: 'definition',
+                    customFieldValues: { Extra: 'extra' },
+                    noteId: 123,
+                },
+            };
+            for (const listener of runtimeListeners) listener(request, {}, () => undefined);
+            await jest.advanceTimersByTimeAsync(0);
+
+            expect(browser.runtime.sendMessage).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    message: expect.objectContaining({
+                        command: 'record-media-and-forward-subtitle',
+                        text: expected,
+                        word: 'word',
+                        definition: 'definition',
+                        customFieldValues: { Extra: 'extra' },
+                        noteId: 123,
+                    }),
+                })
+            );
+            binding.unbind();
+        }
+    );
+
+    it('recalculates adaptive playback when annotations arrive and retains the full subtitle collection', async () => {
+        const dictionaryTracks: DictionaryTrack[] = JSON.parse(JSON.stringify(defaultSettings.dictionaryTracks));
+        dictionaryTracks[0].dictionaryPlaybackConfig.fastForward.onStatuses[TokenStatus.UNCOLLECTED].enabled = true;
+        await storage.set({ dictionaryTracks });
+        let finishTokenization!: () => void;
+        const tokenizationReady = new Promise<void>((resolve) => {
+            finishTokenization = resolve;
+        });
+        const sendMessage = (globalThis as any).browser.runtime.sendMessage as jest.Mock<
+            (request: any) => Promise<any>
+        >;
+        sendMessage.mockImplementation(async ({ message }) => {
+            if (message.command === 'http-post') {
+                if (message.url.endsWith('/yomitanVersion')) return { version: '0.0.0.0' };
+                if (message.url.endsWith('/tokenize')) {
+                    await tokenizationReady;
+                    return message.body.text.map((text: string, index: number) => ({
+                        id: 'id',
+                        source: 'source',
+                        dictionary: 'dictionary',
+                        index,
+                        content: [[{ text, reading: '' }]],
+                    }));
+                }
+                if (message.url.endsWith('/termEntries')) return { dictionaryEntries: [] };
+                throw new Error(`Unexpected annotation request: ${message.url}`);
+            }
+            if (message.command === 'dictionary-get-bulk' || message.command === 'dictionary-get-by-lemma-bulk')
+                return {};
+            if (message.command === 'dictionary-get-records')
+                return { tokenRecords: [], ankiCardRecords: {}, waniKaniSubjectRecords: {} };
+        });
+        const video = createVideo();
+        const binding = new Binding(video, bindingOptions(false, false));
+        try {
+            binding.bind();
+            await flushPlaybackTiming();
+            sendSubtitles(binding, [
+                makeSubtitle({ text: 'word', start: 1000, end: 2000 }),
+                makeSubtitle({ text: 'other', start: 4000, end: 5000, index: 1 }),
+            ]);
+            video.currentTime = 1.5;
+            binding.togglePlayMode(PlayMode.fastForward);
+            await flushPlaybackTiming();
+            expect(video.playbackRate).toBe(defaultSettings.fastForwardModePlaybackRate);
+
+            finishTokenization();
+            await jest.advanceTimersByTimeAsync(50);
+
+            expect(binding.subtitleController.subtitles[0].tokenization?.tokens[0].status).toBe(
+                TokenStatus.UNCOLLECTED
+            );
+            expect(video.playbackRate).toBe(defaultSettings.playbackRate);
+            video.presentFrame(4500);
+            await flushPlaybackTiming();
+            expect(binding.subtitleController.currentSubtitle()[0]?.text).toBe('other');
+            expect(video.playbackRate).toBe(defaultSettings.playbackRate);
+        } finally {
+            finishTokenization();
+            binding.unbind();
+        }
+    });
+
+    it.each([
+        { automatic: false, adaptive: false, selectionEnabled: true },
+        { automatic: true, adaptive: false, selectionEnabled: true },
+        { automatic: true, adaptive: true, selectionEnabled: false },
+    ])(
+        'selects words through the subtitle controller on pause and paused seek: %j',
+        async ({ automatic, adaptive, selectionEnabled }) => {
+            const dictionaryTracks: DictionaryTrack[] = JSON.parse(JSON.stringify(defaultSettings.dictionaryTracks));
+            dictionaryTracks[0].dictionaryPlaybackConfig.selectOnPause.onStatuses[TokenStatus.UNCOLLECTED].enabled =
+                selectionEnabled;
+            dictionaryTracks[0].dictionaryPlaybackConfig.autoPause.onStatuses[TokenStatus.UNCOLLECTED].enabled =
+                adaptive;
+            await storage.set({ dictionaryTracks, autoPausePreference: AutoPausePreference.atEnd });
+            const sendMessage = (globalThis as any).browser.runtime.sendMessage as jest.Mock<
+                (request: any) => Promise<any>
+            >;
+            sendMessage.mockImplementation(async ({ message }) => {
+                if (message.command === 'http-post') {
+                    if (message.url.endsWith('/yomitanVersion')) return { version: '0.0.0.0' };
+                    if (message.url.endsWith('/tokenize')) {
+                        return message.body.text.map((text: string, index: number) => ({
+                            id: 'id',
+                            source: 'source',
+                            dictionary: 'dictionary',
+                            index,
+                            content: [[{ text, reading: '' }]],
+                        }));
+                    }
+                    if (message.url.endsWith('/termEntries')) return { dictionaryEntries: [] };
+                    throw new Error(`Unexpected annotation request: ${message.url}`);
+                }
+                if (message.command === 'dictionary-get-bulk' || message.command === 'dictionary-get-by-lemma-bulk')
+                    return {};
+                if (message.command === 'dictionary-get-records')
+                    return { tokenRecords: [], ankiCardRecords: {}, waniKaniSubjectRecords: {} };
+            });
+            const video = createVideo();
+            jest.spyOn(video, 'pause').mockImplementation(() => {
+                (video as HTMLVideoElement & { paused: boolean }).paused = true;
+                video.dispatchEvent(new Event('pause'));
+            });
+            const binding = new Binding(video, bindingOptions(false, false));
+            try {
+                binding.bind();
+                await flushPlaybackTiming();
+                sendSubtitles(binding, [
+                    makeSubtitle({ text: 'word', start: 1000, end: 2000 }),
+                    makeSubtitle({ text: 'next', start: 4000, end: 5000, index: 1 }),
+                ]);
+                video.presentFrame(1500);
+                await jest.advanceTimersByTimeAsync(1100);
+                expect(binding.subtitleController.subtitles[0].tokenization?.tokens[0].status).toBe(
+                    TokenStatus.UNCOLLECTED
+                );
+                if (automatic) {
+                    binding.togglePlayMode(PlayMode.autoPause);
+                    video.presentFrame(1999);
+                } else video.pause();
+                await jest.advanceTimersByTimeAsync(200);
+                expect(binding.subtitleController.currentTokenSelectionLocation()).toEqual({
+                    subtitleIndex: 0,
+                    tokenStart: 0,
+                });
+                expect(document.querySelector('.asb-token-selected')?.textContent).toBe('word');
+                expect(document.querySelector('.asb-token-selected')?.closest('.asb-playback-paused')).not.toBeNull();
+                video.currentTime = 4.5;
+                video.dispatchEvent(new Event('seeking'));
+                video.dispatchEvent(new Event('seeked'));
+                await jest.advanceTimersByTimeAsync(200);
+                expect(binding.subtitleController.currentTokenSelectionLocation()).toEqual(
+                    selectionEnabled ? { subtitleIndex: 1, tokenStart: 0 } : undefined
+                );
+                expect(document.querySelector('.asb-token-selected')?.textContent).toBe(
+                    selectionEnabled ? 'next' : undefined
+                );
+                (video as HTMLVideoElement & { paused: boolean }).paused = false;
+                video.dispatchEvent(new Event('play'));
+                await flushPlaybackTiming();
+                expect(document.querySelector('.asb-token-selected')).toBeNull();
+            } finally {
+                binding.unbind();
+            }
+        }
+    );
 
     it('shows active playback modes above the transition notification', async () => {
         const video = createVideo();

@@ -17,6 +17,7 @@ import IconButton from '@mui/material/IconButton';
 import CloseIcon from '@mui/icons-material/Close';
 import type { Theme } from '@mui/material';
 import type { DictionaryProvider } from '@project/common/dictionary-db';
+import type { LogProvider } from '@project/common/util/log';
 import { useAnnotationTutorial } from '@project/common/hooks/use-annotation-tutorial';
 import { AppExtensionGlobalStateProvider } from '@project/common/app/services/app-extension-global-state-provider';
 
@@ -28,7 +29,7 @@ const appTestCard = () => {
 const useStyles = makeStyles<Theme>((theme) => ({
     root: {
         '& .MuiPaper-root': {
-            height: '100vh',
+            height: '100dvh',
         },
     },
     content: {
@@ -47,8 +48,10 @@ const useStyles = makeStyles<Theme>((theme) => ({
 interface Props {
     anki: Anki;
     extension: ChromeExtension;
+    supportsDictionaryPlayback: boolean;
     open: boolean;
     dictionaryProvider: DictionaryProvider;
+    logProvider: LogProvider;
     settings: AsbplayerSettings;
     scrollToId?: string;
     onSettingsChanged: (settings: Partial<AsbplayerSettings>) => void;
@@ -63,8 +66,10 @@ interface Props {
 export default function SettingsDialog({
     anki,
     extension,
+    supportsDictionaryPlayback,
     open,
     dictionaryProvider,
+    logProvider,
     settings,
     scrollToId,
     onSettingsChanged,
@@ -109,6 +114,7 @@ export default function SettingsDialog({
                     extensionSupportsOrderableAnkiFields={extension.supportsOrderableAnkiFields}
                     extensionSupportsTrackSpecificSettings={extension.supportsTrackSpecificSettings}
                     extensionSupportsSubtitlesWidthSetting={extension.supportsSubtitlesWidthSetting}
+                    extensionSupportsSubtitlesWidthInPixels={extension.supportsSubtitlesWidthInPixels}
                     extensionSupportsPauseOnHover={extension.supportsPauseOnHover}
                     extensionSupportsPlaybackEngine={extension.supportsPlaybackEngine}
                     extensionSupportsAutoPauseResume={extension.supportsAutoPauseResume}
@@ -120,12 +126,16 @@ export default function SettingsDialog({
                     extensionSupportsDictionaryMatchAcrossScripts={extension.supportsDictionaryMatchAcrossScripts}
                     extensionSupportsSeekableTrackSetting={extension.supportsSeekableTrackSetting}
                     extensionSupportsAutoCopyableTrackSetting={extension.supportsAutoCopyableTrackSetting}
+                    extensionOwnsWebSocketClient={extension.supportsWebSocketClientOwnership}
                     extensionSupportsDictionaryTokenStatusDisplayAlpha={
                         extension.supportsDictionaryTokenStatusDisplayAlpha
                     }
+                    supportsDictionaryPlayback={supportsDictionaryPlayback}
                     extensionSupportsDictionaryYomitanMecab={extension.supportsDictionaryYomitanMecab}
                     extensionSupportsSubtitleTrackSelectorInWebApp={extension.supportsSubtitleTrackSelectorInWebApp}
                     extensionSupportsSubtitleListCustomization={extension.supportsSubtitleListCustomization}
+                    extensionSupportsUpdateLastWithSameSubtitleText={extension.supportsUpdateLastWithSameSubtitleText}
+                    extensionSupportsAnimatedImageCapture={extension.supportsAnimatedImageCapture}
                     pageConfigs={extension.pageConfig}
                     insideApp
                     appVersionRepoPath={import.meta.env.VITE_APP_VERSION_REPO_PATH}
@@ -133,6 +143,7 @@ export default function SettingsDialog({
                     onOpenChromeExtensionShortcuts={extension.openShortcuts}
                     onSettingsChanged={onSettingsChanged}
                     dictionaryProvider={dictionaryProvider}
+                    logProvider={logProvider}
                     settings={settings}
                     profiles={profilesContext.profiles}
                     activeProfile={profilesContext.activeProfile}

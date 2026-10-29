@@ -1,15 +1,23 @@
 import type { IndexedSubtitleModel } from '@project/common';
 import { tokenAtLocation } from '@project/common/annotations/token-navigation';
 import type { TokenSelectionLocation } from '@project/common/annotations/token-navigation';
+import { asbTrace } from '@project/common/util/log';
 
 export const ASB_TOKEN_CLASS = 'asb-token';
+export const ASB_TOKEN_ADAPTIVE_HIDDEN_CLASS = 'asb-token-adaptive-hidden';
+export const ASB_PLAYBACK_PAUSED_CLASS = 'asb-playback-paused';
 export const ASB_TOKEN_HIGHLIGHT_CLASS = 'asb-token-highlight';
 export const ASB_TOKEN_SELECTED_CLASS = 'asb-token-selected';
+export const ASB_TOKEN_AUTO_PAUSE_SELECTED_CLASS = 'asb-token-auto-pause-selected';
 export const ASB_SUBTITLE_TOKEN_SELECTED_CLASS = 'asb-subtitle-token-selected';
 export const ASB_SUBTITLE_INDEX_ATTRIBUTE = 'data-asb-subtitle-index';
 export const ASB_TOKEN_START_ATTRIBUTE = 'data-asb-token-start';
 export const ASB_READING_CLASS = 'asb-reading';
 export const ASB_FREQUENCY_CLASS = 'asb-frequency';
+export const ASB_GLOSS_CLASS = 'asb-gloss';
+export const ASB_GLOSS_POPUP_CLASS = 'asb-gloss-popup';
+export const ASB_GLOSS_TEXT_CLASS = 'asb-gloss-text';
+export const ASB_GLOSS_UNDER_CLASS = 'asb-gloss-under';
 export const ASB_PITCH_ACCENT_CLASS = 'asb-pitch-accent';
 export const ASB_PITCH_ACCENT_MORA_CLASS = 'asb-pitch-accent-mora';
 export const ASB_PITCH_ACCENT_MORA_HIGH_CLASS = 'asb-pitch-accent-mora-high';
@@ -61,16 +69,36 @@ export class HoveredToken {
         const tokenEl = selectedTokenEl?.classList.contains(ASB_TOKEN_SELECTED_CLASS)
             ? selectedTokenEl
             : closestCollectableTokenElement(this._hoveredElement);
-        if (!tokenEl) return null;
+        if (!tokenEl) {
+            asbTrace('annotations/parse', 'Failed to find token element from hovered element', {
+                hoveredElement: this._hoveredElement?.tagName,
+            });
+            return null;
+        }
 
         const trackStr = tokenEl.closest('[data-track]')?.getAttribute('data-track');
-        if (!trackStr) return null;
+        if (!trackStr) {
+            asbTrace('annotations/parse', 'Failed to parse track from hovered token element', {
+                tagName: tokenEl.tagName,
+            });
+            return null;
+        }
 
         let token = '';
         for (const child of tokenEl.childNodes) token += this._extractTokenFromNode(child);
         token = token.trim();
-        if (!token.length) return null;
-        return { token, track: parseInt(trackStr) };
+        if (!token.length) {
+            asbTrace('annotations/parse', 'Failed to parse token from hovered token element', {
+                tagName: tokenEl.tagName,
+            });
+            return null;
+        }
+        const track = parseInt(trackStr);
+        asbTrace('annotations/parse', 'Parsed token and track from hovered token element', {
+            token,
+            track,
+        });
+        return { token, track };
     }
 
     private _extractTokenFromNode(node: Node): string {
@@ -93,6 +121,8 @@ export class HoveredToken {
 }
 
 export interface SelectTokenInRootOptions {
+    autoPause?: boolean;
+    onlyIfUnselected?: boolean;
     focusContainer?: boolean;
     scrollIntoView?: boolean;
     selectText?: boolean;
@@ -127,7 +157,7 @@ export const clearTokenSelectionInRoot = (root: ParentNode) => {
         selectedToken?.classList.contains(ASB_TOKEN_SELECTED_CLASS) && (root as Node).contains(selectedToken);
 
     for (const selectedToken of root.querySelectorAll(`.${ASB_TOKEN_SELECTED_CLASS}`)) {
-        selectedToken.classList.remove(ASB_TOKEN_SELECTED_CLASS);
+        selectedToken.classList.remove(ASB_TOKEN_SELECTED_CLASS, ASB_TOKEN_AUTO_PAUSE_SELECTED_CLASS);
     }
     for (const selectedSubtitle of root.querySelectorAll(`.${ASB_SUBTITLE_TOKEN_SELECTED_CLASS}`)) {
         selectedSubtitle.classList.remove(ASB_SUBTITLE_TOKEN_SELECTED_CLASS);
@@ -135,36 +165,79 @@ export const clearTokenSelectionInRoot = (root: ParentNode) => {
     if (clearTextSelection) selection?.removeAllRanges();
 };
 
+export const clearAutoPauseTokenSelectionInRoot = (root: ParentNode) => {
+    if (root.querySelector(`.${ASB_TOKEN_AUTO_PAUSE_SELECTED_CLASS}`)) clearTokenSelectionInRoot(root);
+};
+
+/** Prefers the text selection inside root, then the token marked as selected within root. */
+const selectedTokenElementInRoot = (
+    root: ParentNode
+): { readonly tokenElement: HTMLElement; readonly ownsTextSelection: boolean } | undefined => {
+    const document = root instanceof Document ? root : root.ownerDocument;
+    if (!document) return;
+    const selection = document.getSelection();
+    const selectedElement = [
+        closestAddressableTokenElement(selection?.anchorNode ?? null),
+        closestAddressableTokenElement(selection?.focusNode ?? null),
+    ].find((element): element is HTMLElement => element !== null && (root as Node).contains(element));
+    if (selectedElement) return { tokenElement: selectedElement, ownsTextSelection: true };
+    const markedElement = root.querySelector<HTMLElement>(`[${ASB_TOKEN_START_ATTRIBUTE}].${ASB_TOKEN_SELECTED_CLASS}`);
+    return markedElement ? { tokenElement: markedElement, ownsTextSelection: false } : undefined;
+};
+
+const tokenElementLocation = (tokenElement: Element): TokenSelectionLocation | undefined => {
+    const subtitleElement = tokenElement.closest(`[${ASB_SUBTITLE_INDEX_ATTRIBUTE}]`);
+    if (!subtitleElement) return;
+    const subtitleIndex = numberAttribute(subtitleElement, ASB_SUBTITLE_INDEX_ATTRIBUTE);
+    const tokenStart = numberAttribute(tokenElement, ASB_TOKEN_START_ATTRIBUTE);
+    if (subtitleIndex === undefined || tokenStart === undefined) return;
+    return { subtitleIndex, tokenStart };
+};
+
 export const currentTokenSelectionLocation = (
     subtitles: readonly IndexedSubtitleModel[] | undefined,
     root: ParentNode = window.document
 ): TokenSelectionLocation | undefined => {
-    const document = root instanceof Document ? root : root.ownerDocument;
-    if (!document) return;
-    const selection = document.getSelection();
-    const tokenElement =
-        closestAddressableTokenElement(selection?.anchorNode ?? null) ??
-        closestAddressableTokenElement(selection?.focusNode ?? null) ??
-        root.querySelector<HTMLElement>(`[${ASB_TOKEN_START_ATTRIBUTE}].${ASB_TOKEN_SELECTED_CLASS}`);
-    if (!tokenElement || !(root as Node).contains(tokenElement)) return;
+    const selected = selectedTokenElementInRoot(root);
+    const location = selected && tokenElementLocation(selected.tokenElement);
+    if (!location || !tokenAtLocation(subtitles, location)) return;
+    return location;
+};
 
-    const subtitleElement = tokenElement.closest(`[${ASB_SUBTITLE_INDEX_ATTRIBUTE}]`);
-    if (!subtitleElement) return;
+export interface RestorableTokenSelection {
+    readonly location: TokenSelectionLocation;
+    readonly options: Pick<SelectTokenInRootOptions, 'autoPause' | 'selectText'>;
+}
 
-    const subtitleIndex = numberAttribute(subtitleElement, ASB_SUBTITLE_INDEX_ATTRIBUTE);
-    const tokenStart = numberAttribute(tokenElement, ASB_TOKEN_START_ATTRIBUTE);
-    if (subtitleIndex === undefined || tokenStart === undefined) return;
-
-    if (!tokenAtLocation(subtitles, { subtitleIndex, tokenStart })) return;
-
-    return { subtitleIndex, tokenStart };
+/**
+ * Captures the token selection in root so it can be reapplied after re-rendering. The text selection is only
+ * restored when root owned it, so re-rendering never takes over a selection elsewhere in the document.
+ */
+export const restorableTokenSelectionInRoot = (root: ParentNode): RestorableTokenSelection | undefined => {
+    const selected = selectedTokenElementInRoot(root);
+    const location = selected && tokenElementLocation(selected.tokenElement);
+    if (!location) return;
+    return {
+        location,
+        options: {
+            autoPause: selected.tokenElement.classList.contains(ASB_TOKEN_AUTO_PAUSE_SELECTED_CLASS),
+            selectText: selected.ownsTextSelection,
+        },
+    };
 };
 
 export const selectTokenInRoot = (
     root: ParentNode,
     target: TokenSelectionLocation,
-    { focusContainer = true, scrollIntoView = true, selectText = true }: SelectTokenInRootOptions = {}
+    {
+        autoPause = false,
+        onlyIfUnselected = false,
+        focusContainer = true,
+        scrollIntoView = true,
+        selectText = true,
+    }: SelectTokenInRootOptions = {}
 ) => {
+    if (onlyIfUnselected && restorableTokenSelectionInRoot(root)) return true; // Treat an existing selection as fulfilled so delayed pause selection stops retrying.
     const selector =
         `[${ASB_SUBTITLE_INDEX_ATTRIBUTE}="${target.subtitleIndex}"] ` +
         `[${ASB_TOKEN_START_ATTRIBUTE}="${target.tokenStart}"]`;
@@ -177,7 +250,10 @@ export const selectTokenInRoot = (
         '.asb-subtitles, .asbplayer-subtitles, .asbplayer-fullscreen-subtitles'
     );
     subtitleElement?.classList.add(ASB_SUBTITLE_TOKEN_SELECTED_CLASS);
-    for (const tokenElement of tokenElements) tokenElement.classList.add(ASB_TOKEN_SELECTED_CLASS);
+    for (const tokenElement of tokenElements) {
+        tokenElement.classList.add(ASB_TOKEN_SELECTED_CLASS);
+        if (autoPause) tokenElement.classList.add(ASB_TOKEN_AUTO_PAUSE_SELECTED_CLASS);
+    }
 
     const tokenElement =
         tokenElements.find((element) => element.closest('.asbplayer-subtitle-rich')) ?? tokenElements[0];

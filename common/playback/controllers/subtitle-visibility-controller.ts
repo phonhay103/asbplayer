@@ -1,4 +1,5 @@
 import { SubtitleVisibility } from '@project/common/settings';
+import { asbTrace } from '@project/common/util/log';
 
 export const subtitleVisibilityNotificationKey = 'subtitle-visibility';
 
@@ -9,12 +10,18 @@ export interface SubtitleVisibilityNotification {
 }
 
 export const nextSubtitleVisibility = (visibility: SubtitleVisibility): SubtitleVisibility =>
-    visibility === SubtitleVisibility.whenDue ? SubtitleVisibility.whilePaused : SubtitleVisibility.whenDue;
+    visibility === SubtitleVisibility.whenDue
+        ? SubtitleVisibility.whilePaused
+        : visibility === SubtitleVisibility.whilePaused
+          ? SubtitleVisibility.whileManuallyPaused
+          : SubtitleVisibility.whenDue;
 
 export const subtitleVisibilityLocKey = (visibility: SubtitleVisibility): string =>
     visibility === SubtitleVisibility.whilePaused
         ? 'settings.subtitleVisibilityWhilePaused'
-        : 'settings.subtitleVisibilityWhenDue';
+        : visibility === SubtitleVisibility.whileManuallyPaused
+          ? 'settings.subtitleVisibilityWhileManuallyPaused'
+          : 'settings.subtitleVisibilityWhenDue';
 
 export const formatSubtitleVisibilityNotification = (
     visibility: SubtitleVisibility
@@ -25,6 +32,7 @@ export const formatSubtitleVisibilityNotification = (
 });
 
 export interface SubtitleVisibilityControllerCallbacks {
+    readonly automaticallyPaused: () => boolean;
     readonly visibilityChanged: () => void;
 }
 
@@ -35,7 +43,6 @@ export default class SubtitleVisibilityController {
     private readonly callbacks: SubtitleVisibilityControllerCallbacks;
     private visibility = SubtitleVisibility.whenDue;
     private _subtitlesVisible = true;
-    private automaticPauseActive = false;
     private planInitialized = false;
 
     constructor(callbacks: SubtitleVisibilityControllerCallbacks) {
@@ -46,71 +53,74 @@ export default class SubtitleVisibilityController {
         return this._subtitlesVisible;
     }
 
-    replacePlan(visibility: SubtitleVisibility, paused: boolean): void {
+    replacePlan(visibility: SubtitleVisibility, { paused }: { readonly paused: boolean }): void {
         if (this.planInitialized && visibility === this.visibility) return;
         this.mutate(() => {
             this.planInitialized = true;
             this.visibility = visibility;
-            this.automaticPauseActive = false;
-            this._subtitlesVisible = this.visibleWhen(paused);
-        });
+            this._subtitlesVisible = this.visibleWhen({ paused });
+        }, 'plan-replaced');
     }
 
     autoPaused(): void {
         this.mutate(() => {
-            this.automaticPauseActive = true;
-            this._subtitlesVisible = true;
-        });
+            this._subtitlesVisible = this.visibility !== SubtitleVisibility.whileManuallyPaused;
+        }, 'auto-paused');
     }
 
     autoPauseResumeDelayStarted(): void {
         this.mutate(() => {
-            this._subtitlesVisible = this.visibleWhen(false);
-        });
+            this._subtitlesVisible = this.visibleWhen({ paused: false });
+        }, 'auto-pause-resume-delay-started');
     }
 
     playbackPaused(): void {
-        if (this.automaticPauseActive) return;
+        if (this.callbacks.automaticallyPaused()) return;
         this.mutate(() => {
             this._subtitlesVisible = true;
-        });
+        }, 'playback-paused');
     }
 
     playbackStarted(): void {
         this.mutate(() => {
-            this.automaticPauseActive = false;
-            this._subtitlesVisible = this.visibleWhen(false);
-        });
+            this._subtitlesVisible = this.visibleWhen({ paused: false });
+        }, 'playback-started');
     }
 
-    userSeeked(paused: boolean): void {
+    userSeeked({ paused }: { readonly paused: boolean }): void {
         this.mutate(() => {
-            this.automaticPauseActive = false;
-            this._subtitlesVisible = this.visibleWhen(paused);
-        });
+            this._subtitlesVisible = this.visibleWhen({ paused });
+        }, 'user-seeked');
     }
 
-    autoPauseCancelled(paused: boolean): void {
+    autoPauseCancelled({ paused }: { readonly paused: boolean }): void {
         this.mutate(() => {
-            this.automaticPauseActive = false;
-            this._subtitlesVisible = this.visibleWhen(paused);
-        });
+            this._subtitlesVisible = this.visibleWhen({ paused });
+        }, 'auto-pause-cancelled');
     }
 
     cancel(): void {
         this.mutate(() => {
-            this.automaticPauseActive = false;
-            this._subtitlesVisible = this.visibleWhen(false);
-        });
+            this._subtitlesVisible = this.visibleWhen({ paused: false });
+        }, 'cancelled');
     }
 
-    private mutate(mutation: () => void): void {
+    private mutate(mutation: () => void, reason: string): void {
         const visibleBefore = this.subtitlesVisible;
         mutation();
-        if (visibleBefore !== this.subtitlesVisible) this.callbacks.visibilityChanged();
+        if (visibleBefore === this.subtitlesVisible) return;
+        asbTrace('playback/subtitles', 'Changed subtitle visibility', {
+            reason,
+            subtitlesVisible: this.subtitlesVisible,
+            subtitlesVisibleBefore: visibleBefore,
+        });
+        this.callbacks.visibilityChanged();
     }
 
-    private visibleWhen(paused: boolean): boolean {
-        return this.visibility === SubtitleVisibility.whenDue || paused;
+    private visibleWhen({ paused }: { readonly paused: boolean }): boolean {
+        return (
+            this.visibility === SubtitleVisibility.whenDue ||
+            (paused && (this.visibility === SubtitleVisibility.whilePaused || !this.callbacks.automaticallyPaused()))
+        );
     }
 }
