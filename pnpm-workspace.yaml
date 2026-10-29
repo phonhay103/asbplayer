@@ -3,22 +3,55 @@
 # we can pick it up.
 minimumReleaseAge: 10080
 
-# Pinned past CRITICAL advisories that the parents have not released yet:
-# dompurify 3.4.16 (GHSA-cg2g-xh64-v4q7), proxy-addr 2.0.7 (CVE-2026-90711),
-# shell-quote 1.10.0 (CVE-2026-102422), tinypool 1.1.1 (CVE-2026-104848 and
-# CVE-2026-104849), form-data 4.0.2 (CVE-2026-12125). Drop an entry once its
-# parent resolves a patched range.
-#
-# tinypool is the one that crosses a major: @docusaurus/core 3.10.2 asks for
-# ^1.0.2 (its canary line already uses ^2). The docs build was re-run with
-# DOCUSAURUS_SSG_WORKER_THREADS=2 so the string-array SSG path actually
-# constructs a Tinypool, and it generates its static files under 2.x.
+# Advisories whose parents have not released a fixed range. Each entry answers
+# a specific advisory (CRITICAL first, then the HIGH dev-toolchain ones) and is
+# keyed by the vulnerable major where several coexist, so a major bump never
+# rides along. Drop an entry once its parent resolves a patched version.
 overrides:
+    # CRITICAL
     dompurify: ^3.4.17
     proxy-addr: ^2.0.8
     shell-quote: ^1.12.0
-    tinypool: ^2.1.2
     form-data: ^4.0.6
+    # tinypool is the one that crosses a major: @docusaurus/core 3.10.2 asks for
+    # ^1.0.2 (its canary line already uses ^2). The docs build was re-run with
+    # DOCUSAURUS_SSG_WORKER_THREADS=2 so the pooled SSG path actually constructs
+    # a Tinypool, and it generates its static files under 2.x.
+    tinypool: ^2.1.2
+    # HIGH — docusaurus/webpack/CLI toolchain, dev-only
+    '@babel/plugin-transform-modules-systemjs': ^7.29.4
+    '@xmldom/xmldom': ^0.8.15
+    adm-zip: ^0.6.1
+    body-parser: ^1.20.9
+    'brace-expansion@^1.0.0': ^1.1.20
+    'brace-expansion@^2.0.0': ^2.1.6
+    'brace-expansion@^5.0.0': ^5.0.11
+    compression: ^1.8.2
+    defu: ^6.1.5
+    fast-uri: ^3.1.7
+    fast-xml-parser: ^4.5.5
+    flatted: ^3.4.2
+    follow-redirects: ^1.16.1
+    glob: ^10.5.0
+    image-size: ^2.0.3
+    joi: ^17.13.7
+    'js-yaml@^3.0.0': ^3.15.2
+    'js-yaml@^4.0.0': ^4.3.2
+    launch-editor: ^2.14.2
+    lodash: ^4.18.0
+    'minimatch@^3.0.0': ^3.1.4
+    'minimatch@^5.0.0': ^5.1.8
+    'minimatch@^9.0.0': ^9.0.7
+    # 1.3.x carries four advisories that 1.4.0 fixes; 1.4.0 itself only has one
+    # that has no fix published yet.
+    node-forge: ^1.4.0
+    picomatch: ^2.3.2
+    serialize-javascript: ^7.0.3
+    source-map-js: ^1.2.2
+    undici: ^7.30.1
+    vite: ^8.2.4
+    webpack-dev-middleware: ^7.4.6
+    ws: ^8.21.0
 
 packages:
     - 'client'
