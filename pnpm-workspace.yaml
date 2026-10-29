@@ -3,6 +3,21 @@
 # we can pick it up.
 minimumReleaseAge: 10080
 
+# Pinned past CRITICAL advisories that the parents have not released yet:
+# dompurify 3.4.16 (GHSA-cg2g-xh64-v4q7), proxy-addr 2.0.7 (CVE-2026-90711),
+# shell-quote 1.10.0 (CVE-2026-102422), tinypool 1.1.1 (CVE-2026-104848 and
+# CVE-2026-104849). Drop an entry once its parent resolves a patched range.
+#
+# tinypool is the one that crosses a major: @docusaurus/core 3.10.2 asks for
+# ^1.0.2 (its canary line already uses ^2). The docs build was re-run with
+# DOCUSAURUS_SSG_WORKER_THREADS=2 so the string-array SSG path actually
+# constructs a Tinypool, and it generates its static files under 2.x.
+overrides:
+    dompurify: ^3.4.17
+    proxy-addr: ^2.0.8
+    shell-quote: ^1.12.0
+    tinypool: ^2.1.2
+
 packages:
     - 'client'
     - 'common'
